@@ -1,0 +1,7 @@
+{
+  "name": "Aqara Camera 2-way Audio",
+  "homeassistant": "2026.2.0",
+  "render_readme": true,
+  "zip_release": true,
+  "filename": "aqara_camera_2_way_audio.zip"
+}

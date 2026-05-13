@@ -1,0 +1,16 @@
+# Development files
+docs/
+CLAUDE.md
+.claude/
+/docs
+/logs
+/scripts
+/probes
+pytest.ini
+
+# Python
+__pycache__/
+
+# Testing
+.pytest_cache/
+.coverage

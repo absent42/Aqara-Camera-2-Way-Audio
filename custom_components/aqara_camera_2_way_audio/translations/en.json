@@ -1,0 +1,93 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add an Aqara camera",
+        "description": "Choose a camera detected on your network, or pick 'Other' to enter an IP manually.",
+        "data": {
+          "camera_choice": "Camera"
+        }
+      },
+      "manual": {
+        "title": "Add an Aqara camera (manual)",
+        "description": "Enter the camera's LAN IP and RTSP credentials. RTSP must be enabled in the Aqara app under camera settings > RTSP LAN Preview.",
+        "data": {
+          "camera_ip": "Camera IP address",
+          "rtsp_username": "RTSP username",
+          "rtsp_password": "RTSP password"
+        }
+      },
+      "credentials": {
+        "title": "Configure {name}",
+        "description": "Detected an Aqara camera: {name} (model {model}). Enter the RTSP credentials configured in the Aqara app to add it.",
+        "data": {
+          "rtsp_username": "RTSP username",
+          "rtsp_password": "RTSP password"
+        }
+      },
+      "zeroconf_confirm": {
+        "title": "Configure {name}",
+        "description": "Detected an Aqara camera: {name} (model {model}). Enter the RTSP credentials configured in the Aqara app to add it.",
+        "data": {
+          "rtsp_username": "RTSP username",
+          "rtsp_password": "RTSP password"
+        }
+      }
+    },
+    "error": {
+      "invalid_ip": "Enter a valid IPv4 or IPv6 address (not a hostname or URL).",
+      "cannot_connect": "Cannot connect to camera on port 54324. Verify the IP and that the camera is online.",
+      "unknown": "An unexpected error occurred."
+    },
+    "abort": {
+      "already_configured": "This camera is already configured.",
+      "not_a_camera": "Discovered device is not an Aqara camera."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Aqara Camera options",
+        "data": {
+          "backchannel_channel": "Channel used for 2-way audio"
+        },
+        "data_description": {
+          "backchannel_channel": "Which RTSP channel (1 = high, 2 = medium, 3 = low) the go2rtc backchannel routes through. Default: 1."
+        }
+      }
+    }
+  },
+  "entity": {
+    "camera": {
+      "camera_ch1": { "name": "High quality" },
+      "camera_ch2": { "name": "Medium quality" },
+      "camera_ch3": { "name": "Low quality" }
+    }
+  },
+  "services": {
+    "talk_audio_file": {
+      "name": "Play audio file on camera",
+      "description": "Play a pre-recorded AAC-ADTS audio file through the camera speaker.",
+      "fields": {
+        "file_path": {
+          "name": "File path",
+          "description": "Path to an AAC-ADTS audio file (16 kHz mono)."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "path_not_allowed": {
+      "message": "Path not allowed: {file_path}. Check allowlist_external_dirs."
+    },
+    "no_camera_target": {
+      "message": "No Aqara camera selected as target. Pass entity_id or device_id."
+    },
+    "connect_failed": {
+      "message": "Failed to connect to camera -- the voice channel may already be in use by browser two-way audio or another session."
+    },
+    "file_too_large": {
+      "message": "File too large ({size} bytes); maximum is {max_size} bytes."
+    }
+  }
+}

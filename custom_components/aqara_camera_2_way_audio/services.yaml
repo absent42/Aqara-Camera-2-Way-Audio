@@ -1,0 +1,20 @@
+talk_audio_file:
+  name: Play audio file on camera
+  description: >
+    Play a pre-recorded AAC-ADTS audio file through the camera speaker.
+    Cannot be used while browser two-way audio is active; the camera
+    supports one voice session at a time.
+  target:
+    entity:
+      integration: aqara_camera_2_way_audio
+      domain: camera
+    device:
+      integration: aqara_camera_2_way_audio
+  fields:
+    file_path:
+      name: File path
+      description: Path to an AAC-ADTS audio file (16 kHz mono).
+      required: true
+      example: "/config/sounds/doorbell_response.aac"
+      selector:
+        text:

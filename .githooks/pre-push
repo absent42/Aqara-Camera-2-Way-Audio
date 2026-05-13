@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# pre-push hook: run the test suite before allowing a push.
+# Install once: git config core.hooksPath .githooks
+set -e
+echo "Running pytest tests/ ..."
+python3 -m pytest tests/
