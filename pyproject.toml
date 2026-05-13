@@ -1,2 +1,6 @@
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Pin the async-fixture loop scope. Future pytest-asyncio versions change
+# the default to "function"; setting it explicitly silences the deprecation
+# warning and keeps behaviour stable across upgrades.
+asyncio_default_fixture_loop_scope = "function"

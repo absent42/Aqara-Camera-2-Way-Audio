@@ -8,8 +8,6 @@ talk_audio_file:
     entity:
       integration: aqara_camera_2_way_audio
       domain: camera
-    device:
-      integration: aqara_camera_2_way_audio
   fields:
     file_path:
       name: File path
