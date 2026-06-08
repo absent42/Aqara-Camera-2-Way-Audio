@@ -8,7 +8,7 @@ See the [Aqara LANLink](https://github.com/absent42/Aqara-LANLink) integration f
 
 ## Status
 
-This is the v1.0 release of the integration, refactored from an earlier G400-doorbell proof of concept. It aims to be a useful, focused integration for one specific job (streaming + 2-way audio) rather than a full replacement for Aqara's cloud or HomeKit integrations. For motion events, recording, and device management, pair it with the Aqara Home app or the HomeKit integration.
+This is the v1.0 release of the integration, refactored from an earlier G400-doorbell proof of concept. It aims to be a useful, focused integration for one specific job (streaming + 2-way audio) rather than a full replacement for Aqara's cloud or HomeKit integrations. For motion events, recording, and device management, pair it with the Aqara Home app, HomeKit, or use the [Aqara LANLink](https://github.com/absent42/Aqara-LANLink) integration. 
 
 ## Features
 
