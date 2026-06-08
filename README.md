@@ -4,6 +4,8 @@ Local-only multi-quality streaming and two-way audio for Aqara LAN cameras. No c
 
 Protocol reverse-engineered from the Aqara Android app. Built generically: any Aqara camera that exposes RTSP at `/ch1`, `/ch2`, `/ch3` on port 8554 plus the TCP 54324 LAN talk protocol should work.
 
+See the [Aqara LANLink](https://github.com/absent42/Aqara-LANLink) integration for support for local detection events and more with Aqara cameras and doorbells. 
+
 ## Status
 
 This is the v1.0 release of the integration, refactored from an earlier G400-doorbell proof of concept. It aims to be a useful, focused integration for one specific job (streaming + 2-way audio) rather than a full replacement for Aqara's cloud or HomeKit integrations. For motion events, recording, and device management, pair it with the Aqara Home app or the HomeKit integration.
