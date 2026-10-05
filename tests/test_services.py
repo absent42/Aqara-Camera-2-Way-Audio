@@ -297,3 +297,52 @@ async def test_connect_failure_raises_home_assistant_error(
             {"entity_id": target, "file_path": "/tmp/x.aac"},
             blocking=True,
         )
+
+
+async def test_service_disconnects_after_send(
+    hass: HomeAssistant,
+    mock_talk_client,
+    mock_send_aac_file,
+    allow_paths,
+) -> None:
+    """The voice session is released once the file has been sent.
+
+    Leaving it open keeps the heartbeat running, so the camera never times
+    the session out and stays in talk mode until the entry is reloaded.
+    """
+    await _set_up_entry(hass, "192.0.2.10")
+    registry = er.async_get(hass)
+    target = registry.async_get_entity_id("camera", DOMAIN, "192.0.2.10_camera_ch1")
+
+    await hass.services.async_call(
+        DOMAIN,
+        "talk_audio_file",
+        {"entity_id": target, "file_path": "/tmp/x.aac"},
+        blocking=True,
+    )
+
+    mock_send_aac_file.assert_awaited_once()
+    mock_talk_client.disconnect.assert_awaited_once()
+
+
+async def test_service_disconnects_when_send_raises(
+    hass: HomeAssistant,
+    mock_talk_client,
+    mock_send_aac_file,
+    allow_paths,
+) -> None:
+    """The voice session is released even if sending the file fails."""
+    await _set_up_entry(hass, "192.0.2.10")
+    mock_send_aac_file.side_effect = ServiceValidationError("boom")
+    registry = er.async_get(hass)
+    target = registry.async_get_entity_id("camera", DOMAIN, "192.0.2.10_camera_ch1")
+
+    with pytest.raises(ServiceValidationError):
+        await hass.services.async_call(
+            DOMAIN,
+            "talk_audio_file",
+            {"entity_id": target, "file_path": "/tmp/x.aac"},
+            blocking=True,
+        )
+
+    mock_talk_client.disconnect.assert_awaited_once()

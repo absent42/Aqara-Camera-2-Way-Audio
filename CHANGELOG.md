@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v1.0.1] - 2026-10-05
+
+### Fixed
+
+- `talk_audio_file` now closes the voice session after the file is sent. Previously the heartbeat kept the session open indefinitely, leaving the camera in talk mode (and blocking browser two-way audio) until the integration was reloaded.
+
 ## [1.0.0] - 2026-05-13
 
 Initial release of Aqara Camera 2-way audio integration. Refactored from the earlier G400-doorbell proof of concept.

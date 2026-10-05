@@ -140,7 +140,13 @@ async def async_setup_entry(
                             translation_domain=DOMAIN,
                             translation_key="connect_failed",
                         )
-                await _send_aac_file(hass, rt.talk_client, file_path)
+                # Release the session once the file is sent. The heartbeat
+                # loop keeps it alive indefinitely otherwise, holding the
+                # camera in talk mode and blocking browser two-way audio.
+                try:
+                    await _send_aac_file(hass, rt.talk_client, file_path)
+                finally:
+                    await rt.talk_client.disconnect()
 
         hass.services.async_register(
             DOMAIN, "talk_audio_file", handle_talk_audio_file, schema=TALK_AUDIO_SCHEMA,
