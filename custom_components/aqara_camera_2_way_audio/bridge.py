@@ -1,7 +1,7 @@
 """go2rtc exec bridge: stdin audio -> Aqara camera speaker.
 
 This script is spawned by go2rtc as an exec source with backchannel enabled.
-go2rtc pipes PCM audio (s16le, 16kHz, mono) from the browser's microphone
+go2rtc pipes G.711 A-law audio (8kHz, mono) from the browser's microphone
 to this script's stdin. The script encodes it to AAC-LC ADTS, manages the
 Aqara TCP control session, and sends frames to the camera via UDP RTP.
 
@@ -43,6 +43,7 @@ from custom_components.aqara_camera_2_way_audio.const import (  # noqa: E402
     CONTROL_PORT,
     FRAME_DURATION,
     HEARTBEAT_INTERVAL,
+    MAGIC,
     RTP_PAYLOAD_TYPE,
     TCP_CONNECT_TIMEOUT,
     TYPE_ACK,
@@ -54,9 +55,9 @@ from custom_components.aqara_camera_2_way_audio.protocol import build_packet, bu
 
 _LOGGER = logging.getLogger(__name__)
 
-# PCM read chunk: go2rtc v1.9.14 sends PCML (s16le) at 16kHz (2 bytes/sample).
-# 2048 bytes = 1024 samples = one AAC frame worth (~64ms).
-STDIN_CHUNK_SIZE = 2048
+# The entry point below selects PCMA/8kHz: 256 bytes is 32ms of input.
+# Output AAC frames still contain 1024 samples at 16kHz (64ms).
+STDIN_CHUNK_SIZE = 256
 
 
 class BridgeSession:
@@ -72,9 +73,69 @@ class BridgeSession:
         self._heartbeat_thread: threading.Thread | None = None
         self._running = False
         self._stop_event = threading.Event()
+        self._received = bytearray()
+        self._stop_allowed = False
+
+    @property
+    def active(self) -> bool:
+        """Read the current session state, including heartbeat failures."""
+        return bool(self._running and self._tcp_sock and self._udp_sock)
+
+    def _receive_packet(self, deadline: float) -> dict:
+        """Accumulate TCP fragments and retain coalesced messages for later."""
+        while True:
+            if len(self._received) >= 5:
+                if self._received[:2] != MAGIC:
+                    raise ConnectionError("Invalid control packet header")
+                length = int.from_bytes(self._received[3:5], "big")
+                if length > 64:
+                    raise ConnectionError("Invalid control packet length")
+                total = 7 + length
+                if len(self._received) >= total:
+                    raw = bytes(self._received[:total])
+                    del self._received[:total]
+                    parsed = parse_packet(raw)
+                    if parsed is None:
+                        raise ConnectionError("Invalid control packet")
+                    return parsed
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Control ACK timeout")
+            if self._tcp_sock is None:
+                raise ConnectionError("Control socket closed")
+            self._tcp_sock.settimeout(remaining)
+            data = self._tcp_sock.recv(1024)
+            if not data:
+                raise ConnectionError("Camera closed control connection")
+            self._received.extend(data)
+
+    def _request_ack(self, packet_type: int) -> bool:
+        """Wait for one complete ACK within a single bounded deadline."""
+        assert self._tcp_sock is not None
+        self._tcp_sock.sendall(build_packet(packet_type, self._session_ts))
+        if packet_type == TYPE_START_VOICE:
+            # A lost ACK may still mean START succeeded; clean that up on exit.
+            self._stop_allowed = True
+        deadline = time.monotonic() + TCP_CONNECT_TIMEOUT
+        while True:
+            parsed = self._receive_packet(deadline)
+            if parsed["type"] != TYPE_ACK:
+                continue
+            if parsed["value"] != 0:
+                if packet_type == TYPE_START_VOICE:
+                    # Explicit refusal must not stop another user's call.
+                    self._stop_allowed = False
+                return False
+            return True
 
     def connect(self) -> bool:
         """Open TCP control session and UDP audio socket."""
+        self.close()
+        self._stop_event = threading.Event()
+        self._received.clear()
+        self._session_ts = int(time.time() * 1000)
+        self._seq_num = 0
+        self._ssrc = secrets.randbelow(2**31 - 1) + 1
         try:
             self._tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self._tcp_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -83,13 +144,8 @@ class BridgeSession:
 
             self._udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-            pkt = build_packet(TYPE_START_VOICE, self._session_ts)
-            self._tcp_sock.sendall(pkt)
-
-            resp = self._tcp_sock.recv(1024)
-            parsed = parse_packet(resp) if resp else None
-            if not parsed or parsed["type"] != TYPE_ACK or parsed["value"] != 0:
-                _LOGGER.error("Voice session rejected: %s", parsed)
+            if not self._request_ack(TYPE_START_VOICE):
+                _LOGGER.error("Voice session rejected")
                 self.close()
                 return False
 
@@ -107,7 +163,7 @@ class BridgeSession:
 
     def send_audio_frame(self, aac_frame: bytes) -> None:
         """Send an AAC-ADTS frame via RTP UDP."""
-        if not self._udp_sock:
+        if not self.active:
             return
         ts = self._seq_num * AAC_FRAME_SAMPLES
         header = build_rtp_header(RTP_PAYLOAD_TYPE, ts, self._ssrc, self._seq_num)
@@ -118,12 +174,20 @@ class BridgeSession:
         """Send STOP_VOICE and close sockets."""
         self._running = False
         self._stop_event.set()
+        if self._tcp_sock:
+            try:
+                # Wake recv() before joining, keeping writes available for STOP.
+                self._tcp_sock.shutdown(socket.SHUT_RD)
+            except OSError:
+                pass
         if self._heartbeat_thread and self._heartbeat_thread.is_alive():
             self._heartbeat_thread.join(timeout=2)
             self._heartbeat_thread = None
         if self._tcp_sock:
             try:
-                self._tcp_sock.sendall(build_packet(TYPE_STOP_VOICE, self._session_ts))
+                if self._stop_allowed:
+                    self._tcp_sock.settimeout(TCP_CONNECT_TIMEOUT)
+                    self._tcp_sock.sendall(build_packet(TYPE_STOP_VOICE, self._session_ts))
             except OSError:
                 pass
             try:
@@ -131,6 +195,7 @@ class BridgeSession:
             except OSError:
                 pass
             self._tcp_sock = None
+        self._stop_allowed = False
         if self._udp_sock:
             try:
                 self._udp_sock.close()
@@ -147,15 +212,17 @@ class BridgeSession:
             if not self._running or not self._tcp_sock:
                 break
             try:
-                self._tcp_sock.sendall(build_packet(TYPE_HEARTBEAT, self._session_ts))
-                resp = self._tcp_sock.recv(1024)
-                parsed = parse_packet(resp) if resp else None
-                if parsed and parsed["type"] == TYPE_ACK and parsed["value"] == 0:
+                if self._request_ack(TYPE_HEARTBEAT):
                     failures = 0
                     continue
                 failures += 1
-            except (OSError, TimeoutError):
+            except TimeoutError:
                 failures += 1
+            except OSError as err:
+                if not self._stop_event.is_set():
+                    _LOGGER.error("Control connection lost: %s", err)
+                self._running = False
+                break
             if failures > 5:
                 _LOGGER.error("Heartbeat failed %d times, closing", failures)
                 self._running = False
@@ -193,40 +260,47 @@ def main() -> None:
     # Despite version reporting as 1.9.14, HA's bundled go2rtc uses stdin.NewClient
     # which hardcodes PCMA/8000 and ignores the #audio= parameter.
     encoder = AACEncoder(input_format="alaw")
-    encoder.start()
-    _LOGGER.info("Encoding pipeline active, reading PCMA/8kHz from stdin")
-
     total_frames = 0
     start_time = 0.0  # set on first audio data, not on bridge start
 
     def _send_paced(frame: bytes) -> None:
         """Send a frame, sleeping if ahead of real-time schedule."""
         nonlocal total_frames, start_time
+        if not session.active:
+            raise ConnectionError("Voice session is no longer active")
         if start_time == 0.0:
             start_time = time.monotonic()
         expected_time = start_time + total_frames * FRAME_DURATION
         now = time.monotonic()
         if now < expected_time:
             time.sleep(expected_time - now)
+        if not session.active:
+            raise ConnectionError("Voice session is no longer active")
         session.send_audio_frame(frame)
         total_frames += 1
 
     first_stdin = True
     first_frame = True
+    first_input_time = 0.0
     try:
+        encoder.start()
+        _LOGGER.info("Encoding pipeline active, reading PCMA/8kHz from stdin")
         while True:
             pcm_data = sys.stdin.buffer.read(STDIN_CHUNK_SIZE)
             if not pcm_data:
                 _LOGGER.info("stdin EOF, flushing encoder")
                 break
+            if not session.active:
+                raise ConnectionError("Voice session is no longer active")
             if first_stdin:
+                first_input_time = time.monotonic()
                 _LOGGER.info("First stdin data received (%d bytes)", len(pcm_data))
                 first_stdin = False
             frames = encoder.write_pcm(pcm_data)
             for frame in frames:
                 if first_frame:
                     _LOGGER.info("First AAC frame produced (encoder latency: %.0fms)",
-                                 (time.monotonic() - start_time) * 1000 if start_time else 0)
+                                 (time.monotonic() - first_input_time) * 1000)
                     first_frame = False
                 _send_paced(frame)
 
@@ -238,9 +312,13 @@ def main() -> None:
 
     except KeyboardInterrupt:
         _LOGGER.info("Interrupted, stopping")
+    except (OSError, RuntimeError) as err:
+        _LOGGER.error("Bridge stopped after audio/control failure: %s", err)
+        sys.exit(1)
     finally:
-        encoder.stop()
+        # Release the camera before waiting for the encoder subprocess.
         session.close()
+        encoder.stop()
         _LOGGER.info("Bridge stopped")
 
 

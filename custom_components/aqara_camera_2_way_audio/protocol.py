@@ -157,10 +157,21 @@ def extract_adts_frames(data: bytes) -> list[bytes]:
     scanning, so one bad frame from a malfunctioning or hostile source
     cannot suppress the rest of the buffer.
     """
+    frames, _ = extract_adts_frames_with_consumed(data)
+    return frames
+
+
+def extract_adts_frames_with_consumed(data: bytes) -> tuple[list[bytes], int]:
+    """Return frames and the number of bytes consumed, including resync bytes.
+
+    Streaming callers must remove skipped garbage as well as complete frames.
+    The incomplete trailing header/frame is retained for the next read.
+    ``extract_adts_frames`` keeps its existing list-only API for file callers.
+    """
     frames: list[bytes] = []
     offset = 0
     malformed_logged = False
-    while offset < len(data) - 7:
+    while offset <= len(data) - 7:
         if data[offset] != 0xFF or (data[offset + 1] & 0xF0) != 0xF0:
             offset += 1
             continue
@@ -184,4 +195,4 @@ def extract_adts_frames(data: bytes) -> list[bytes]:
             break
         frames.append(data[offset : offset + frame_len])
         offset += frame_len
-    return frames
+    return frames, offset
