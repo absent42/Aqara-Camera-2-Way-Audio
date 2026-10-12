@@ -19,6 +19,7 @@ from custom_components.aqara_camera_2_way_audio.protocol import (
     build_rtp_header,
     crc16_kermit,
     extract_adts_frames,
+    extract_adts_frames_with_consumed,
     parse_packet,
 )
 
@@ -148,6 +149,24 @@ class TestExtractADTSFrames:
         combined = frame1 + frame2
         frames = extract_adts_frames(combined)
         assert frames == [frame1, frame2]
+
+    def test_streaming_consumes_garbage_and_preserves_incomplete_tail(self) -> None:
+        frame1 = self._adts_header(20) + b"\xAA" * 13
+        frame2 = self._adts_header(30) + b"\xBB" * 23
+        prefix = b"\x00" * 40
+        data = prefix + frame1 + frame2[:10]
+        frames, consumed = extract_adts_frames_with_consumed(data)
+        assert frames == [frame1]
+        assert consumed == len(prefix) + len(frame1)
+        tail = data[consumed:] + frame2[10:]
+        frames, consumed = extract_adts_frames_with_consumed(tail)
+        assert frames == [frame2]
+        assert consumed == len(frame2)
+
+    def test_complete_seven_byte_frame_is_consumed(self) -> None:
+        frame = self._adts_header(7)
+        assert extract_adts_frames(frame) == [frame]
+        assert extract_adts_frames_with_consumed(frame) == ([frame], 7)
 
     def test_skips_garbage_before_sync(self) -> None:
         garbage = b"\x00\x01\x02"

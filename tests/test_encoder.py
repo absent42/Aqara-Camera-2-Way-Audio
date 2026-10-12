@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import shutil
+import io
 import subprocess
-from unittest.mock import MagicMock
+import sys
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -58,6 +60,12 @@ class TestFFmpegCommandShape:
         assert input_section[input_section.index("-f") + 1] == "alaw"
         assert input_section[input_section.index("-ar") + 1] == "8000"
 
+    @pytest.mark.parametrize("cmd", [FFMPEG_CMD_PCM, FFMPEG_CMD_ALAW])
+    def test_raw_input_probe_is_bounded(self, cmd: list[str]) -> None:
+        assert cmd[cmd.index("-probesize") + 1] == "32"
+        assert cmd[cmd.index("-analyzeduration") + 1] == "0"
+        assert cmd.index("-probesize") < cmd.index("-i")
+
 
 class TestStartRequiresFFmpeg:
     """If ffmpeg is not installed we cannot exercise live encoding."""
@@ -73,6 +81,30 @@ class TestStartRequiresFFmpeg:
         enc = AACEncoder()
         enc.start()
         enc.stop()
+
+    @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not installed")
+    @pytest.mark.parametrize("input_format,chunk", [
+        ("pcm", b"\x00" * 1024),
+        ("alaw", b"\xd5" * 256),
+    ])
+    def test_real_encoder_preserves_aac_format_and_flush_api(self, input_format, chunk) -> None:
+        enc = AACEncoder(input_format=input_format)
+        enc.start()
+        frames = []
+        try:
+            for _ in range(32):
+                frames.extend(enc.write_pcm(chunk))
+            frames.extend(enc.flush())
+            assert frames
+            for frame in frames:
+                assert frame[:2] == b"\xff\xf1"
+                assert (frame[2] >> 6) == 1  # AAC-LC
+                assert ((frame[2] >> 2) & 15) == 8  # 16kHz
+                channels = ((frame[2] & 1) << 2) | (frame[3] >> 6)
+                assert channels == 1
+            assert enc.flush() == []
+        finally:
+            enc.stop()
 
 
 class TestSubprocessCleanup:
@@ -118,3 +150,60 @@ class TestSubprocessCleanup:
         proc.kill.assert_called_once()
         assert proc.wait.call_count == 2
         assert enc._proc is None
+
+    def test_flush_real_pipe_does_not_flush_closed_stdin(self) -> None:
+        """Popen.communicate must not raise ValueError after explicit close."""
+        frame = bytes.fromhex("fff16040017ffc") + b"data"
+        enc = AACEncoder()
+        enc._proc = subprocess.Popen(
+            [sys.executable, "-c",
+             "import sys; sys.stdin.buffer.read(); "
+             f"sys.stdout.buffer.write(bytes.fromhex('{frame.hex()}'))"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=0,
+        )
+        try:
+            assert enc.flush() == [frame]
+            assert enc._proc.stdin is None
+            assert enc.flush() == []
+        finally:
+            enc.stop()
+
+
+class TestStreamingWrites:
+    def test_closed_pipe_is_reported_instead_of_silently_dropping_input(self) -> None:
+        enc = AACEncoder()
+        enc._proc = MagicMock()
+        enc._proc.stdin.write.return_value = 0
+        with patch.object(enc, "_read_available", return_value=[]):
+            with pytest.raises(BrokenPipeError):
+                enc.write_pcm(b"data")
+
+    def test_partial_raw_pipe_writes_are_completed(self) -> None:
+        class ShortWriter(io.BytesIO):
+            def write(self, data) -> int:
+                return super().write(bytes(data[:2]))
+
+        enc = AACEncoder()
+        enc._proc = MagicMock()
+        enc._proc.stdin = ShortWriter()
+        with patch.object(enc, "_read_available", return_value=[]) as read:
+            assert enc.write_pcm(b"1234567") == []
+        assert enc._proc.stdin.getvalue() == b"1234567"
+        assert read.call_count == 2
+
+    def test_resync_does_not_emit_a_frame_twice(self) -> None:
+        frame = bytes.fromhex("fff16040017ffc") + b"data"
+        enc = AACEncoder()
+        enc._buffer.extend(b"\x00" * 40 + frame)
+        assert enc._extract_frames() == [frame]
+        assert enc._extract_frames() == []
+
+    def test_write_drains_output_before_input_and_afterwards(self) -> None:
+        enc = AACEncoder()
+        enc._proc = MagicMock()
+        enc._proc.stdin.write.return_value = 4
+        calls = []
+        enc._proc.stdin.write.side_effect = lambda data: calls.append("write") or len(data)
+        with patch.object(enc, "_read_available", side_effect=lambda: calls.append("read") or []):
+            enc.write_pcm(b"data")
+        assert calls == ["read", "write", "read"]

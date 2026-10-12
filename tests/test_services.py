@@ -35,11 +35,9 @@ def mock_send_aac_file():
 
 
 @pytest.fixture
-def allow_paths():
+def allow_paths(hass: HomeAssistant):
     """Patch hass.config.is_allowed_path to permit our test path."""
-    with patch(
-        "homeassistant.core.Config.is_allowed_path", return_value=True
-    ):
+    with patch.object(type(hass.config), "is_allowed_path", return_value=True):
         yield
 
 
@@ -90,10 +88,7 @@ async def test_targets_by_device_id(
     """Service call targeting one device_id triggers send for that entry."""
     entry = await _set_up_entry(hass, "192.0.2.10")
     device_reg = dr.async_get(hass)
-    devices = [
-        d for d in device_reg.devices.values()
-        if entry.entry_id in d.config_entries
-    ]
+    devices = dr.async_entries_for_config_entry(device_reg, entry.entry_id)
     assert len(devices) == 1
 
     await hass.services.async_call(
@@ -161,7 +156,7 @@ async def test_disallowed_file_path_raises(
     registry = er.async_get(hass)
     target_entity = registry.async_get_entity_id("camera", DOMAIN, "192.0.2.10_camera_ch1")
 
-    with patch("homeassistant.core.Config.is_allowed_path", return_value=False):
+    with patch.object(type(hass.config), "is_allowed_path", return_value=False):
         with pytest.raises(ServiceValidationError):
             await hass.services.async_call(
                 DOMAIN,
