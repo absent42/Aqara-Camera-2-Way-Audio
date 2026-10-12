@@ -4,6 +4,8 @@ pytest-homeassistant-custom-component>=0.13
 # Transitive runtime dep of homeassistant.components.ffmpeg (used by
 # the snapshot path); not pulled in by pytest-homeassistant-custom-component.
 ha-ffmpeg>=3.0
+# camera.img_util imports this optional camera dependency during collection.
+PyTurboJPEG>=1.7,<2
 # Used by discovery.py and the mDNS test fixtures. HA bundles zeroconf
 # at runtime but pytest-homeassistant-custom-component doesn't always
 # pin it as a hard dep, so we list it explicitly for CI.
