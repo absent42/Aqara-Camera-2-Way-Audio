@@ -1,15 +1,24 @@
-# v1.0.0 - Aqara Camera 2-Way Audio
+# v1.0.2 - Aqara Camera 2-Way Audio
 
-Initial release of Aqara Camera 2-way audio integration. Refactored from the earlier G400-doorbell proof of concept.
+Reliability release. Talk sessions now survive network quirks and bad messages from the camera, recover cleanly when the camera drops the connection, and start with less delay.
+
+Contribution by [alikorkmaz](https://github.com/alikorkmaz).
 
 ## Highlights
 
-- **Three quality streams per camera** -- one HA camera entity per channel (high / medium / low). Pick the one you want in dashboards; disable the others in the entity registry.
-- **Snapshots** -- now supported on all three entities via Home Assistant's bundled ffmpeg.
-- **Options flow** -- pick which RTSP channel carries the WebRTC 2-way audio backchannel. Default is the high-quality stream; change it any time and the integration reloads automatically.
-- **Multi-camera service targeting** -- the `talk_audio_file` action now takes `entity_id` or `device_id`, plays audio through the targeted camera's speaker, and deduplicates when you target multiple entities of the same camera.
-- **Persistent restart notification** -- when `go2rtc.yaml` is updated, you get a clear prompt to restart Home Assistant. Restarts where the config is already current produce no notification.
-- **Full test suite** -- 60 pytest tests run on every push (and locally via the included `.githooks/pre-push` hook). GitHub Actions also runs the suite as a backstop.
+- **More reliable session start** -- talk no longer fails when the camera's reply arrives split across network reads or bundled with another reply. Applies to both browser talk and the `talk_audio_file` action.
+- **Sessions survive bad messages** -- a single corrupted or unrecognised control message from the camera no longer ends an active talk session.
+- **Clean recovery after a dropped connection** -- if the camera drops the talk connection while nobody is speaking, the bridge exits promptly, so the next push-to-talk starts a fresh session instead of failing.
+- **Accurate camera health checks** -- a late heartbeat reply is no longer counted as the answer to the next heartbeat, so a camera that has stopped responding is detected.
+- **Smoother audio** -- audio queued during a pause in speech is no longer sent in a burst when speech resumes. Duplicate frames and dropped microphone audio in the encoder are also fixed.
+- **Lower latency** -- the bridge reads microphone input in 32 ms chunks instead of 256 ms, and ffmpeg no longer probes the known input format at startup.
+- **Safer cleanup** -- a refused talk session no longer sends a stop command that could end another caller's session, and the camera is released if the encoder fails to start.
+
+See [CHANGELOG.md](CHANGELOG.md) for the full list of fixes.
+
+## Upgrading
+
+No configuration changes. Restart Home Assistant after updating.
 
 ## Compatibility
 
@@ -17,6 +26,7 @@ Initial release of Aqara Camera 2-way audio integration. Refactored from the ear
   |---|---|
   | Aqara Camera G100 | Confirmed |
   | Aqara Doorbell G400 | Confirmed |
+  | Aqara Camera G410 | Confirmed |
   | Other Aqara cameras | Unknown -- PRs welcome to update this table |
 
 ## Requirements

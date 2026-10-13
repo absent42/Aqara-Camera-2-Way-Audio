@@ -4,6 +4,27 @@ All notable changes to this project are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v1.0.2] - 2026-10-13
+
+### Fixed
+
+Contribution by [alikorkmaz](https://github.com/alikorkmaz)
+
+- Two-way talk no longer fails when the camera's reply to a start or heartbeat request arrives split across network reads, or bundled with another reply. Applies to both browser talk and the `talk_audio_file` service.
+- A single corrupted or unrecognised control message from the camera no longer ends an active talk session.
+- A late heartbeat reply is no longer counted as the answer to the next heartbeat, which could hide a camera that had stopped responding.
+- If the camera drops the talk connection while nobody is speaking, the bridge now exits promptly instead of staying alive with a dead session, so the next push-to-talk starts cleanly.
+- When the camera refuses a talk session, the integration no longer sends a stop command that could end another caller's session.
+- The bridge stops sending audio once the talk session has ended, and releases the camera if the encoder fails to start.
+- Audio queued during a pause in speech is no longer sent in a burst when speech resumes, which could garble playback on the camera.
+- Fixed duplicate audio frames after the encoder skipped malformed output, microphone audio being dropped on partial writes to ffmpeg, and an error when flushing the encoder on some Python versions.
+- Talk sessions now shut down cleanly when the heartbeat is blocked on a stalled connection.
+
+### Changed
+
+- Lower startup latency for browser two-way talk: the bridge reads microphone input in 32 ms chunks instead of 256 ms, and ffmpeg no longer probes the known raw input format.
+- Lower CPU use in the encoder while streaming.
+
 ## [v1.0.1] - 2026-10-05
 
 ### Fixed
