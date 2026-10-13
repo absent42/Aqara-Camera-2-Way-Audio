@@ -11,6 +11,7 @@ import pytest
 from custom_components.aqara_camera_2_way_audio.const import (
     TCP_CONNECT_TIMEOUT,
     TYPE_ACK,
+    TYPE_HEARTBEAT,
 )
 from custom_components.aqara_camera_2_way_audio.protocol import build_packet
 from custom_components.aqara_camera_2_way_audio.talk import AqaraLanTalkClient
@@ -159,6 +160,63 @@ async def test_connect_empty_resp_returns_false(mock_reader_writer) -> None:
         result = await client.connect()
     assert result is False
     writer.close.assert_called()
+
+
+async def test_connect_accepts_fragmented_ack(mock_reader_writer, mock_udp_transport) -> None:
+    """A START ACK split across TCP segments is reassembled, not rejected."""
+    reader, writer = mock_reader_writer
+    client = AqaraLanTalkClient("192.0.2.10")
+    ack = _ack_bytes(0)
+    loop = asyncio.get_running_loop()
+    reader.read = AsyncMock(side_effect=[ack[:3], ack[3:]])
+    with patch("asyncio.open_connection", new=AsyncMock(return_value=(reader, writer))), \
+         patch.object(loop, "create_datagram_endpoint",
+                      new=AsyncMock(return_value=(mock_udp_transport, None))):
+        assert await client.connect() is True
+    await client.disconnect()
+
+
+async def test_connect_skips_other_packet_coalesced_before_ack(
+    mock_reader_writer, mock_udp_transport
+) -> None:
+    reader, writer = mock_reader_writer
+    client = AqaraLanTalkClient("192.0.2.10")
+    coalesced = build_packet(TYPE_HEARTBEAT, 1) + _ack_bytes(0)
+    assert await _connect_with_mocks(client, reader, writer, mock_udp_transport, ack=coalesced)
+    await client.disconnect()
+
+
+async def test_late_reply_does_not_answer_next_heartbeat(mock_reader_writer) -> None:
+    """A reply to a timed-out heartbeat is discarded, not credited to the next."""
+    reader, writer = mock_reader_writer
+    chunks = [_ack_bytes(0), None, _ack_bytes(1)]
+
+    async def read(_n: int) -> bytes:
+        item = chunks.pop(0)
+        if item is None:
+            await asyncio.sleep(1)  # nothing else pending; the discard times out
+        return item
+
+    reader.read = read
+    client = AqaraLanTalkClient("192.0.2.10")
+    client._reader, client._writer = reader, writer
+    client._packets.feed(_ack_bytes(0)[:3])  # tail of an earlier partial read
+
+    await client._discard_stale_replies()
+    assert await client._request_ack(TYPE_HEARTBEAT) == 1
+    assert not chunks
+
+
+async def test_heartbeat_eof_closes_session(mock_reader_writer, mock_udp_transport) -> None:
+    reader, writer = mock_reader_writer
+    client = AqaraLanTalkClient("192.0.2.10")
+    await _connect_with_mocks(client, reader, writer, mock_udp_transport)
+    reader.read = AsyncMock(return_value=b"")
+    with patch("custom_components.aqara_camera_2_way_audio.talk.HEARTBEAT_INTERVAL", 0):
+        await asyncio.wait_for(client._heartbeat_task, timeout=2.0)
+    assert client.is_connected is False
+    writer.close.assert_called()
+    mock_udp_transport.close.assert_called()
 
 
 async def test_disconnect_closes_both_transports_and_cancels_heartbeat(

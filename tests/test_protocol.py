@@ -15,6 +15,7 @@ from custom_components.aqara_camera_2_way_audio.const import (
     TYPE_STOP_VOICE,
 )
 from custom_components.aqara_camera_2_way_audio.protocol import (
+    ControlPacketBuffer,
     build_packet,
     build_rtp_header,
     crc16_kermit,
@@ -94,6 +95,40 @@ class TestLmLocalPacketParseRejects:
         packet = build_packet(TYPE_HEARTBEAT, 0)
         # Cut the packet inside its payload region.
         assert parse_packet(packet[:7]) is None
+
+
+class TestControlPacketBuffer:
+    """Stream reassembly shared by the exec bridge and the async talk client."""
+
+    def test_fragmented_packet_is_reassembled(self) -> None:
+        ack = build_packet(TYPE_ACK, 0)
+        buf = ControlPacketBuffer()
+        for i in range(len(ack) - 1):
+            buf.feed(ack[i : i + 1])
+            assert buf.pop() is None
+        buf.feed(ack[-1:])
+        assert buf.pop() == {"type": TYPE_ACK, "value": 0}
+        assert len(buf) == 0
+
+    def test_coalesced_packets_are_returned_in_order(self) -> None:
+        buf = ControlPacketBuffer()
+        buf.feed(build_packet(TYPE_HEARTBEAT, 7) + build_packet(TYPE_ACK, 1))
+        assert buf.pop() == {"type": TYPE_HEARTBEAT, "value": 7}
+        assert buf.pop() == {"type": TYPE_ACK, "value": 1}
+        assert buf.pop() is None
+
+    def test_corrupt_packet_is_skipped(self) -> None:
+        bad = bytearray(build_packet(TYPE_ACK, 0))
+        bad[-1] ^= 1
+        buf = ControlPacketBuffer()
+        buf.feed(b"\x01\x02" + bytes(bad) + build_packet(TYPE_ACK, 3))
+        assert buf.pop() == {"type": TYPE_ACK, "value": 3}
+
+    def test_clear_drops_partial_packet(self) -> None:
+        buf = ControlPacketBuffer()
+        buf.feed(build_packet(TYPE_ACK, 0)[:4])
+        buf.clear()
+        assert len(buf) == 0
 
 
 class TestRTPHeader:

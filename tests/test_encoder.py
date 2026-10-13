@@ -15,6 +15,7 @@ from custom_components.aqara_camera_2_way_audio.encoder import (
     FFMPEG_CMD_PCM,
     AACEncoder,
 )
+from custom_components.aqara_camera_2_way_audio.protocol import extract_adts_frames_with_consumed
 
 
 class TestFFmpegCommandSelection:
@@ -197,6 +198,26 @@ class TestStreamingWrites:
         enc._buffer.extend(b"\x00" * 40 + frame)
         assert enc._extract_frames() == [frame]
         assert enc._extract_frames() == []
+
+    def test_extraction_accepts_buffer_without_copy_and_returns_bytes(self) -> None:
+        frame = bytes.fromhex("fff16040017ffc") + b"data"
+        enc = AACEncoder()
+        enc._buffer.extend(frame)
+        with patch("custom_components.aqara_camera_2_way_audio.encoder.extract_adts_frames_with_consumed",
+                   wraps=extract_adts_frames_with_consumed) as extract:
+            frames = enc._extract_frames()
+        assert extract.call_args.args[0] is enc._buffer
+        assert frames == [frame] and type(frames[0]) is bytes
+
+    def test_read_without_new_output_skips_rescan(self) -> None:
+        enc = AACEncoder()
+        enc._proc = MagicMock()
+        enc._buffer.extend(bytes.fromhex("fff16040017ffc"))  # incomplete frame
+        with patch("custom_components.aqara_camera_2_way_audio.encoder.select.select",
+                   return_value=([], [], [])), \
+             patch.object(enc, "_extract_frames") as extract:
+            assert enc._read_available() == []
+        extract.assert_not_called()
 
     def test_write_drains_output_before_input_and_afterwards(self) -> None:
         enc = AACEncoder()

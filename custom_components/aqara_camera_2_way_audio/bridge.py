@@ -44,7 +44,6 @@ from custom_components.aqara_camera_2_way_audio.const import (  # noqa: E402
     CONTROL_PORT,
     FRAME_DURATION,
     HEARTBEAT_INTERVAL,
-    MAGIC,
     RTP_PAYLOAD_TYPE,
     TCP_CONNECT_TIMEOUT,
     TYPE_ACK,
@@ -52,7 +51,11 @@ from custom_components.aqara_camera_2_way_audio.const import (  # noqa: E402
     TYPE_START_VOICE,
     TYPE_STOP_VOICE,
 )
-from custom_components.aqara_camera_2_way_audio.protocol import build_packet, build_rtp_header, parse_packet  # noqa: E402
+from custom_components.aqara_camera_2_way_audio.protocol import (  # noqa: E402
+    ControlPacketBuffer,
+    build_packet,
+    build_rtp_header,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -64,9 +67,27 @@ STDIN_CHUNK_SIZE = 256
 # while go2rtc was sending no audio.
 STDIN_POLL_INTERVAL = 0.5
 
-# Real control packets carry at most an 8-byte payload. A larger declared
-# length means the reader locked onto a false header and must resync.
-MAX_CONTROL_PAYLOAD = 64
+# Pacing may send late frames back to back to absorb encoder jitter, but a
+# larger lag means input paused; restart the schedule instead of bursting.
+MAX_PACING_LAG = 0.25
+
+
+class FramePacer:
+    """Hold frames to real-time rate, restarting the schedule after a pause."""
+
+    def __init__(self) -> None:
+        self._next_send = 0.0  # the schedule starts at the first frame
+
+    def wait(self) -> None:
+        """Block until the next frame is due."""
+        now = time.monotonic()
+        if now < self._next_send:
+            time.sleep(self._next_send - now)
+        elif now - self._next_send > MAX_PACING_LAG:
+            # First frame, or input resumed after a pause: start a new
+            # schedule rather than bursting the backlog to catch up.
+            self._next_send = now
+        self._next_send += FRAME_DURATION
 
 
 class BridgeSession:
@@ -82,7 +103,7 @@ class BridgeSession:
         self._heartbeat_thread: threading.Thread | None = None
         self._running = False
         self._stop_event = threading.Event()
-        self._received = bytearray()
+        self._received = ControlPacketBuffer()
         self._stop_allowed = False
 
     @property
@@ -98,7 +119,7 @@ class BridgeSession:
         (ConnectionError) or the deadline (TimeoutError) ends the wait.
         """
         while True:
-            parsed = self._pop_buffered_packet()
+            parsed = self._received.pop()
             if parsed is not None:
                 return parsed
             remaining = deadline - time.monotonic()
@@ -113,42 +134,7 @@ class BridgeSession:
             data = sock.recv(1024)
             if not data:
                 raise ConnectionError("Camera closed control connection")
-            self._received.extend(data)
-
-    def _pop_buffered_packet(self) -> dict | None:
-        """Remove and return the first valid packet, or None if incomplete."""
-        buf = self._received
-        while len(buf) >= 5:
-            if buf[:2] != MAGIC:
-                self._resync(1)
-                continue
-            length = int.from_bytes(buf[3:5], "big")
-            if length > MAX_CONTROL_PAYLOAD:
-                self._resync(2)
-                continue
-            total = 7 + length
-            if len(buf) < total:
-                return None
-            parsed = parse_packet(bytes(buf[:total]))
-            if parsed is None:
-                # Bad CRC or unknown type. Drop only the header: if it was a
-                # false match, a real packet may start inside these bytes.
-                _LOGGER.debug("Skipping unparseable control packet %s", buf[:total].hex())
-                self._resync(2)
-                continue
-            del buf[:total]
-            return parsed
-        return None
-
-    def _resync(self, start: int) -> None:
-        """Discard buffered bytes up to the next MAGIC at or after start."""
-        buf = self._received
-        index = buf.find(MAGIC, start)
-        if index < 0:
-            # Keep a trailing first MAGIC byte; its partner may still be in flight.
-            index = len(buf) - 1 if buf.endswith(MAGIC[:1]) else len(buf)
-        _LOGGER.debug("Discarding %d control bytes to resync", index)
-        del buf[:index]
+            self._received.feed(data)
 
     def _discard_stale_replies(self) -> None:
         """Drop late replies to earlier requests that already timed out.
@@ -232,9 +218,13 @@ class BridgeSession:
             return False
 
     def send_audio_frame(self, aac_frame: bytes) -> None:
-        """Send an AAC-ADTS frame via RTP UDP."""
+        """Send an AAC-ADTS frame via RTP UDP.
+
+        Raises ConnectionError once the session has ended, so no caller can
+        silently drop audio into a dead session.
+        """
         if not self.active:
-            return
+            raise ConnectionError("Voice session is no longer active")
         ts = self._seq_num * AAC_FRAME_SAMPLES
         header = build_rtp_header(RTP_PAYLOAD_TYPE, ts, self._ssrc, self._seq_num)
         self._seq_num += 1
@@ -339,22 +329,13 @@ def main() -> None:
     # Despite version reporting as 1.9.14, HA's bundled go2rtc uses stdin.NewClient
     # which hardcodes PCMA/8000 and ignores the #audio= parameter.
     encoder = AACEncoder(input_format="alaw")
+    pacer = FramePacer()
     total_frames = 0
-    start_time = 0.0  # set on first audio data, not on bridge start
 
     def _send_paced(frame: bytes) -> None:
         """Send a frame, sleeping if ahead of real-time schedule."""
-        nonlocal total_frames, start_time
-        if not session.active:
-            raise ConnectionError("Voice session is no longer active")
-        if start_time == 0.0:
-            start_time = time.monotonic()
-        expected_time = start_time + total_frames * FRAME_DURATION
-        now = time.monotonic()
-        if now < expected_time:
-            time.sleep(expected_time - now)
-        if not session.active:
-            raise ConnectionError("Voice session is no longer active")
+        nonlocal total_frames
+        pacer.wait()
         session.send_audio_frame(frame)
         total_frames += 1
 

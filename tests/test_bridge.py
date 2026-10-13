@@ -234,7 +234,7 @@ class TestBridgeHeartbeatLoop:
         session = bridge.BridgeSession("192.0.2.10")
         sock = FakeControlSocket(pending=[_ack(0)], replies=[[_ack(1)]])
         session._tcp_sock = sock
-        session._received.extend(_ack(0)[:3])  # tail of an earlier partial read
+        session._received.feed(_ack(0)[:3])  # tail of an earlier partial read
         assert session._send_heartbeat() is False
         assert [parse_packet(p)["type"] for p in sock.sent] == [TYPE_HEARTBEAT]
         assert sock.blocking
@@ -359,6 +359,7 @@ class TestBridgeMainEntryPoint:
             return [b"frame"]
 
         encoder.write_pcm.side_effect = encode
+        session.send_audio_frame.side_effect = ConnectionError("Voice session is no longer active")
         order = MagicMock()
         order.attach_mock(session.close, "close_session")
         order.attach_mock(encoder.stop, "stop_encoder")
@@ -378,7 +379,7 @@ class TestBridgeMainEntryPoint:
             os.close(read_fd)
             os.close(write_fd)
         assert err.value.code == 1
-        session.send_audio_frame.assert_not_called()
+        session.send_audio_frame.assert_called_once_with(b"frame")
         assert [call[0] for call in order.mock_calls] == ["close_session", "stop_encoder"]
 
     def test_main_exits_when_session_dies_while_stdin_is_idle(self) -> None:
@@ -442,7 +443,45 @@ class TestBridgeSendAudioFrame:
 
             session.close()
 
-    def test_send_audio_frame_silent_before_connect(self) -> None:
-        """Calling send_audio_frame before connect is a no-op (no raise)."""
+    def test_send_audio_frame_raises_without_session(self) -> None:
+        """Frames must not be dropped silently once the session has ended."""
         session = bridge.BridgeSession("192.0.2.10")
-        session.send_audio_frame(b"\xff\xf1FRAME")
+        with pytest.raises(ConnectionError):
+            session.send_audio_frame(b"\xff\xf1FRAME")
+
+
+class TestFramePacer:
+    """Frames go out at real-time rate without bursting after input pauses."""
+
+    @staticmethod
+    def _run(arrivals: list[float]) -> list[float]:
+        """Return the send time of a frame arriving at each clock value."""
+        clock = {"now": 0.0}
+        sends = []
+
+        def sleep(seconds: float) -> None:
+            clock["now"] += seconds
+
+        pacer = bridge.FramePacer()
+        with patch.object(bridge.time, "monotonic", side_effect=lambda: clock["now"]), \
+             patch.object(bridge.time, "sleep", side_effect=sleep):
+            for arrival in arrivals:
+                clock["now"] = max(clock["now"], arrival)
+                pacer.wait()
+                sends.append(round(clock["now"], 3))
+        return sends
+
+    def test_frames_arriving_together_are_spread_out(self) -> None:
+        d = bridge.FRAME_DURATION
+        assert self._run([10.0, 10.0, 10.0]) == [10.0, round(10.0 + d, 3), round(10.0 + 2 * d, 3)]
+
+    def test_small_lag_is_caught_up(self) -> None:
+        d = bridge.FRAME_DURATION
+        # The second frame is a little late; the third keeps the original schedule.
+        sends = self._run([10.0, 10.0 + d + 0.05, 10.0 + d + 0.05])
+        assert sends == [10.0, round(10.0 + d + 0.05, 3), round(10.0 + 2 * d, 3)]
+
+    def test_pause_restarts_schedule_without_burst(self) -> None:
+        d = bridge.FRAME_DURATION
+        sends = self._run([10.0, 10.0 + d, 12.0, 12.0, 12.0])
+        assert sends[2:] == [12.0, round(12.0 + d, 3), round(12.0 + 2 * d, 3)]

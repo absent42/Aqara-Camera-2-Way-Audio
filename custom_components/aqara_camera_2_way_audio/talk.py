@@ -16,9 +16,13 @@ from .const import (
     RTP_PAYLOAD_TYPE, TCP_CONNECT_TIMEOUT,
     TYPE_ACK, TYPE_HEARTBEAT, TYPE_START_VOICE, TYPE_STOP_VOICE,
 )
-from .protocol import build_packet, build_rtp_header, parse_packet
+from .protocol import ControlPacketBuffer, build_packet, build_rtp_header
 
 _LOGGER = logging.getLogger(__name__)
+
+# StreamReader buffers incoming bytes as they arrive, so a late reply is
+# already readable without waiting; this only bounds the check for one.
+STALE_REPLY_WAIT = 0.01
 
 
 class _UDPProtocol(asyncio.DatagramProtocol):
@@ -48,6 +52,7 @@ class AqaraLanTalkClient:
         self._heartbeat_task: asyncio.Task | None = None
         self._connected = False
         self._connect_lock = asyncio.Lock()
+        self._packets = ControlPacketBuffer()
 
     @property
     def is_connected(self) -> bool:
@@ -69,26 +74,20 @@ class AqaraLanTalkClient:
                 )
                 return False
 
-            self._writer.write(build_packet(TYPE_START_VOICE, self._session_ts))
-            await self._writer.drain()
-
+            self._packets.clear()
             try:
-                resp = await asyncio.wait_for(
-                    self._reader.read(1024), timeout=TCP_CONNECT_TIMEOUT,
-                )
+                ack = await self._request_ack(TYPE_START_VOICE)
             except asyncio.TimeoutError:
                 _LOGGER.error("No ACK from camera")
                 await self._close_tcp()
                 return False
-
-            if not resp:
+            except EOFError:
                 _LOGGER.error("Connection closed before ACK")
                 await self._close_tcp()
                 return False
 
-            parsed = parse_packet(resp)
-            if not parsed or parsed["type"] != TYPE_ACK or parsed["value"] != 0:
-                _LOGGER.error("Voice session rejected: %s", parsed)
+            if ack != 0:
+                _LOGGER.error("Voice session rejected: ACK value %d", ack)
                 await self._close_tcp()
                 return False
 
@@ -118,6 +117,48 @@ class AqaraLanTalkClient:
         exc = task.exception()
         if exc is not None:
             _LOGGER.error("Heartbeat task ended unexpectedly: %r", exc)
+
+    async def _read_packet(self, deadline: float) -> dict:
+        """Return the next valid control packet, reading more bytes as needed.
+
+        Raises EOFError if the camera closes the connection and
+        asyncio.TimeoutError once the loop time passes deadline.
+        """
+        loop = asyncio.get_running_loop()
+        while (packet := self._packets.pop()) is None:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            data = await asyncio.wait_for(self._reader.read(1024), timeout=remaining)
+            if not data:
+                raise EOFError("Camera closed control connection")
+            self._packets.feed(data)
+        return packet
+
+    async def _request_ack(self, packet_type: int) -> int:
+        """Send a control packet and return the value of the ACK answering it."""
+        self._writer.write(build_packet(packet_type, self._session_ts))
+        await self._writer.drain()
+        deadline = asyncio.get_running_loop().time() + TCP_CONNECT_TIMEOUT
+        while True:
+            packet = await self._read_packet(deadline)
+            if packet["type"] == TYPE_ACK:
+                return packet["value"]
+
+    async def _discard_stale_replies(self) -> None:
+        """Drop late replies to earlier heartbeats that already timed out.
+
+        _request_ack takes the first ACK it sees, so a reply that arrived
+        after its own request gave up would otherwise answer the next one.
+        """
+        self._packets.clear()
+        while True:
+            try:
+                data = await asyncio.wait_for(self._reader.read(1024), timeout=STALE_REPLY_WAIT)
+            except asyncio.TimeoutError:
+                return
+            if not data:
+                raise EOFError("Camera closed control connection")
 
     def send_audio_frame(self, aac_frame: bytes, timestamp_samples: int) -> None:
         """Send an AAC-ADTS frame via RTP."""
@@ -174,22 +215,17 @@ class AqaraLanTalkClient:
             if not self._connected or not self._writer:
                 break
             try:
-                self._writer.write(build_packet(TYPE_HEARTBEAT, self._session_ts))
-                await self._writer.drain()
-                resp = await asyncio.wait_for(
-                    self._reader.read(1024), timeout=TCP_CONNECT_TIMEOUT
-                )
-                if not resp:
-                    _LOGGER.warning("Connection closed during heartbeat")
-                    self._connected = False
-                    await self._close_tcp()
-                    self._close_udp()
-                    break
-                parsed = parse_packet(resp)
-                if parsed and parsed["type"] == TYPE_ACK and parsed["value"] == 0:
+                await self._discard_stale_replies()
+                if await self._request_ack(TYPE_HEARTBEAT) == 0:
                     failures = 0
                     continue
                 failures += 1
+            except EOFError:
+                _LOGGER.warning("Connection closed during heartbeat")
+                self._connected = False
+                await self._close_tcp()
+                self._close_udp()
+                break
             except (asyncio.TimeoutError, OSError, ConnectionError):
                 failures += 1
 

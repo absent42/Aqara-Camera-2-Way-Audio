@@ -113,7 +113,7 @@ class AACEncoder:
 
     def _extract_frames(self) -> list[bytes]:
         """Consume both complete frames and bytes skipped during resync."""
-        frames, consumed = extract_adts_frames_with_consumed(bytes(self._buffer))
+        frames, consumed = extract_adts_frames_with_consumed(self._buffer)
         del self._buffer[:consumed]
         return frames
 
@@ -123,13 +123,16 @@ class AACEncoder:
             return []
 
         # Non-blocking read of available output
+        received = False
         while select.select([self._proc.stdout], [], [], 0)[0]:
             chunk = self._proc.stdout.read(4096)
             if not chunk:
                 break
             self._buffer.extend(chunk)
+            received = True
 
-        return self._extract_frames()
+        # Unchanged data was already scanned; only an incomplete frame remains.
+        return self._extract_frames() if received else []
 
     def flush(self) -> list[bytes]:
         """Close encoder input and return any remaining AAC-ADTS frames.
