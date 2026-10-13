@@ -15,10 +15,12 @@ from custom_components.aqara_camera_2_way_audio.const import (
     TYPE_STOP_VOICE,
 )
 from custom_components.aqara_camera_2_way_audio.protocol import (
+    ControlPacketBuffer,
     build_packet,
     build_rtp_header,
     crc16_kermit,
     extract_adts_frames,
+    extract_adts_frames_with_consumed,
     parse_packet,
 )
 
@@ -95,6 +97,40 @@ class TestLmLocalPacketParseRejects:
         assert parse_packet(packet[:7]) is None
 
 
+class TestControlPacketBuffer:
+    """Stream reassembly shared by the exec bridge and the async talk client."""
+
+    def test_fragmented_packet_is_reassembled(self) -> None:
+        ack = build_packet(TYPE_ACK, 0)
+        buf = ControlPacketBuffer()
+        for i in range(len(ack) - 1):
+            buf.feed(ack[i : i + 1])
+            assert buf.pop() is None
+        buf.feed(ack[-1:])
+        assert buf.pop() == {"type": TYPE_ACK, "value": 0}
+        assert len(buf) == 0
+
+    def test_coalesced_packets_are_returned_in_order(self) -> None:
+        buf = ControlPacketBuffer()
+        buf.feed(build_packet(TYPE_HEARTBEAT, 7) + build_packet(TYPE_ACK, 1))
+        assert buf.pop() == {"type": TYPE_HEARTBEAT, "value": 7}
+        assert buf.pop() == {"type": TYPE_ACK, "value": 1}
+        assert buf.pop() is None
+
+    def test_corrupt_packet_is_skipped(self) -> None:
+        bad = bytearray(build_packet(TYPE_ACK, 0))
+        bad[-1] ^= 1
+        buf = ControlPacketBuffer()
+        buf.feed(b"\x01\x02" + bytes(bad) + build_packet(TYPE_ACK, 3))
+        assert buf.pop() == {"type": TYPE_ACK, "value": 3}
+
+    def test_clear_drops_partial_packet(self) -> None:
+        buf = ControlPacketBuffer()
+        buf.feed(build_packet(TYPE_ACK, 0)[:4])
+        buf.clear()
+        assert len(buf) == 0
+
+
 class TestRTPHeader:
     """build_rtp_header produces a 12-byte RFC 3550 header."""
 
@@ -148,6 +184,24 @@ class TestExtractADTSFrames:
         combined = frame1 + frame2
         frames = extract_adts_frames(combined)
         assert frames == [frame1, frame2]
+
+    def test_streaming_consumes_garbage_and_preserves_incomplete_tail(self) -> None:
+        frame1 = self._adts_header(20) + b"\xAA" * 13
+        frame2 = self._adts_header(30) + b"\xBB" * 23
+        prefix = b"\x00" * 40
+        data = prefix + frame1 + frame2[:10]
+        frames, consumed = extract_adts_frames_with_consumed(data)
+        assert frames == [frame1]
+        assert consumed == len(prefix) + len(frame1)
+        tail = data[consumed:] + frame2[10:]
+        frames, consumed = extract_adts_frames_with_consumed(tail)
+        assert frames == [frame2]
+        assert consumed == len(frame2)
+
+    def test_complete_seven_byte_frame_is_consumed(self) -> None:
+        frame = self._adts_header(7)
+        assert extract_adts_frames(frame) == [frame]
+        assert extract_adts_frames_with_consumed(frame) == ([frame], 7)
 
     def test_skips_garbage_before_sync(self) -> None:
         garbage = b"\x00\x01\x02"

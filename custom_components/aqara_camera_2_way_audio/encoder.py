@@ -14,7 +14,7 @@ import logging
 import select
 import subprocess
 
-from .protocol import extract_adts_frames
+from .protocol import extract_adts_frames_with_consumed
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -27,6 +27,9 @@ FFMPEG_CMD_PCM = [
     "-f", "s16le",
     "-ar", "16000",
     "-ac", "1",
+    # Raw input has a known format; do not buffer it for stream discovery.
+    "-probesize", "32",
+    "-analyzeduration", "0",
     "-i", "pipe:0",
     "-c:a", "aac",
     "-profile:a", "aac_low",
@@ -46,6 +49,8 @@ FFMPEG_CMD_ALAW = [
     "-f", "alaw",
     "-ar", "8000",
     "-ac", "1",
+    "-probesize", "32",
+    "-analyzeduration", "0",
     "-i", "pipe:0",
     "-c:a", "aac",
     "-profile:a", "aac_low",
@@ -68,10 +73,13 @@ class AACEncoder:
         """
         self._proc: subprocess.Popen | None = None
         self._buffer = bytearray()
+        self._flushed = False
         self._cmd = FFMPEG_CMD_ALAW if input_format == "alaw" else FFMPEG_CMD_PCM
 
     def start(self) -> None:
         """Start the ffmpeg encoder process."""
+        self._flushed = False
+        self._buffer.clear()
         self._proc = subprocess.Popen(
             self._cmd,
             stdin=subprocess.PIPE,
@@ -89,26 +97,42 @@ class AACEncoder:
         if not self._proc or not self._proc.stdin:
             raise RuntimeError("Encoder not started")
 
-        try:
-            self._proc.stdin.write(pcm_data)
-            self._proc.stdin.flush()
-        except BrokenPipeError:
+        frames = self._read_available()
+        # bufsize=0 gives us a raw pipe: writes may be partial. A broken pipe
+        # must propagate so the bridge can release the voice session.
+        remaining = memoryview(pcm_data)
+        while remaining:
+            written = self._proc.stdin.write(remaining)
+            if not written:
+                raise BrokenPipeError("ffmpeg input pipe closed")
+            remaining = remaining[written:]
+        self._proc.stdin.flush()
+
+        frames.extend(self._read_available())
+        return frames
+
+    def _extract_frames(self) -> list[bytes]:
+        """Consume both complete frames and bytes skipped during resync."""
+        frames, consumed = extract_adts_frames_with_consumed(self._buffer)
+        del self._buffer[:consumed]
+        return frames
+
+    def _read_available(self) -> list[bytes]:
+        """Drain ready stdout before/after writing to avoid filling both pipes."""
+        if not self._proc or not self._proc.stdout:
             return []
 
         # Non-blocking read of available output
-        frames: list[bytes] = []
+        received = False
         while select.select([self._proc.stdout], [], [], 0)[0]:
             chunk = self._proc.stdout.read(4096)
             if not chunk:
                 break
             self._buffer.extend(chunk)
+            received = True
 
-        if self._buffer:
-            frames = extract_adts_frames(bytes(self._buffer))
-            consumed = sum(len(f) for f in frames)
-            self._buffer = self._buffer[consumed:]
-
-        return frames
+        # Unchanged data was already scanned; only an incomplete frame remains.
+        return self._extract_frames() if received else []
 
     def flush(self) -> list[bytes]:
         """Close encoder input and return any remaining AAC-ADTS frames.
@@ -116,13 +140,18 @@ class AACEncoder:
         Call this after the last write_pcm() to get frames still buffered
         inside the ffmpeg process.
         """
-        if not self._proc or not self._proc.stdin:
+        if not self._proc or self._flushed:
             return []
+        self._flushed = True
 
-        try:
-            self._proc.stdin.close()
-        except OSError:
-            pass
+        if self._proc.stdin is not None:
+            try:
+                self._proc.stdin.close()
+            except OSError:
+                pass
+            # communicate() otherwise tries to flush the already closed pipe
+            # and raises ValueError before collecting the final AAC frames.
+            self._proc.stdin = None
 
         # Read all remaining output (blocking, with timeout)
         try:
@@ -133,19 +162,15 @@ class AACEncoder:
             _LOGGER.warning("ffmpeg flush timed out; killing and reaping")
             self._proc.kill()
             try:
-                self._proc.communicate()
+                remaining, _ = self._proc.communicate()
+                if remaining:
+                    self._buffer.extend(remaining)
             except OSError as err:
                 _LOGGER.warning("ffmpeg reap after kill failed: %s", err)
         except OSError as err:
             _LOGGER.warning("ffmpeg flush error: %s", err)
 
-        frames: list[bytes] = []
-        if self._buffer:
-            frames = extract_adts_frames(bytes(self._buffer))
-            consumed = sum(len(f) for f in frames)
-            self._buffer = self._buffer[consumed:]
-
-        return frames
+        return self._extract_frames()
 
     def stop(self) -> None:
         """Stop the ffmpeg encoder process."""
@@ -164,5 +189,7 @@ class AACEncoder:
                 self._proc.wait()
             except OSError as err:
                 _LOGGER.warning("ffmpeg reap after kill failed: %s", err)
+        if self._proc.stdout:
+            self._proc.stdout.close()
         self._proc = None
         self._buffer.clear()

@@ -121,6 +121,69 @@ def parse_packet(data: bytes) -> dict | None:
     return {"type": pkt_type, "value": value}
 
 
+# Real control packets carry at most an 8-byte payload. A larger declared
+# length means the reader locked onto a false header and must resync.
+MAX_CONTROL_PAYLOAD = 64
+
+
+class ControlPacketBuffer:
+    """Reassemble control packets from a TCP byte stream.
+
+    TCP may split one packet across reads or coalesce several into one.
+    Garbage, corrupt packets and unknown types are skipped by resyncing to
+    the next MAGIC, so one bad packet cannot desynchronise the stream.
+    """
+
+    def __init__(self) -> None:
+        self._buf = bytearray()
+
+    def __len__(self) -> int:
+        return len(self._buf)
+
+    def feed(self, data: bytes) -> None:
+        """Append bytes received from the socket."""
+        self._buf.extend(data)
+
+    def clear(self) -> None:
+        """Discard everything buffered, including partial packets."""
+        self._buf.clear()
+
+    def pop(self) -> dict | None:
+        """Remove and return the first valid packet, or None if incomplete."""
+        buf = self._buf
+        while len(buf) >= 5:
+            if buf[:2] != MAGIC:
+                self._resync(1)
+                continue
+            length = int.from_bytes(buf[3:5], "big")
+            if length > MAX_CONTROL_PAYLOAD:
+                self._resync(2)
+                continue
+            total = 7 + length
+            if len(buf) < total:
+                return None
+            parsed = parse_packet(bytes(buf[:total]))
+            if parsed is None:
+                # Bad CRC or unknown type. Drop only the header: if it was a
+                # false match, a real packet may start inside these bytes.
+                _LOGGER.debug("Skipping unparseable control packet %s", buf[:total].hex())
+                self._resync(2)
+                continue
+            del buf[:total]
+            return parsed
+        return None
+
+    def _resync(self, start: int) -> None:
+        """Discard buffered bytes up to the next MAGIC at or after start."""
+        buf = self._buf
+        index = buf.find(MAGIC, start)
+        if index < 0:
+            # Keep a trailing first MAGIC byte; its partner may still be in flight.
+            index = len(buf) - 1 if buf.endswith(MAGIC[:1]) else len(buf)
+        _LOGGER.debug("Discarding %d control bytes to resync", index)
+        del buf[:index]
+
+
 # =============================================================================
 # RTP header -- UDP audio channel (port 54323)
 # =============================================================================
@@ -157,10 +220,22 @@ def extract_adts_frames(data: bytes) -> list[bytes]:
     scanning, so one bad frame from a malfunctioning or hostile source
     cannot suppress the rest of the buffer.
     """
+    frames, _ = extract_adts_frames_with_consumed(data)
+    return frames
+
+
+def extract_adts_frames_with_consumed(data: bytes | bytearray) -> tuple[list[bytes], int]:
+    """Return frames and the number of bytes consumed, including resync bytes.
+
+    Streaming callers must remove skipped garbage as well as complete frames,
+    and may pass their bytearray directly: returned frames are always copies.
+    The incomplete trailing header/frame is retained for the next read.
+    ``extract_adts_frames`` keeps its existing list-only API for file callers.
+    """
     frames: list[bytes] = []
     offset = 0
     malformed_logged = False
-    while offset < len(data) - 7:
+    while offset <= len(data) - 7:
         if data[offset] != 0xFF or (data[offset + 1] & 0xF0) != 0xF0:
             offset += 1
             continue
@@ -182,6 +257,6 @@ def extract_adts_frames(data: bytes) -> list[bytes]:
             # Declared frame extends past end of buffer: incomplete trailing
             # frame. Caller is expected to buffer the tail across calls.
             break
-        frames.append(data[offset : offset + frame_len])
+        frames.append(bytes(data[offset : offset + frame_len]))
         offset += frame_len
-    return frames
+    return frames, offset

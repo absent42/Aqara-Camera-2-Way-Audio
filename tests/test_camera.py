@@ -87,10 +87,7 @@ async def test_all_three_share_one_device(
 ) -> None:
     """The three entities are grouped under a single device entry."""
     device_reg = dr.async_get(hass)
-    devices = [
-        d for d in device_reg.devices.values()
-        if configured_entry.entry_id in d.config_entries
-    ]
+    devices = dr.async_entries_for_config_entry(device_reg, configured_entry.entry_id)
     assert len(devices) == 1
 
 
