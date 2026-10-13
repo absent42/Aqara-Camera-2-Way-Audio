@@ -23,6 +23,7 @@ import logging
 import os
 import pathlib
 import secrets
+import select
 import signal
 import socket
 import sys
@@ -59,6 +60,14 @@ _LOGGER = logging.getLogger(__name__)
 # Output AAC frames still contain 1024 samples at 16kHz (64ms).
 STDIN_CHUNK_SIZE = 256
 
+# How often the stdin wait wakes up to notice a control session that died
+# while go2rtc was sending no audio.
+STDIN_POLL_INTERVAL = 0.5
+
+# Real control packets carry at most an 8-byte payload. A larger declared
+# length means the reader locked onto a false header and must resync.
+MAX_CONTROL_PAYLOAD = 64
+
 
 class BridgeSession:
     """Synchronous Aqara talk session for the go2rtc exec bridge."""
@@ -82,37 +91,96 @@ class BridgeSession:
         return bool(self._running and self._tcp_sock and self._udp_sock)
 
     def _receive_packet(self, deadline: float) -> dict:
-        """Accumulate TCP fragments and retain coalesced messages for later."""
+        """Return the next valid control packet, accumulating TCP fragments.
+
+        Coalesced packets stay buffered for the next call. Garbage, corrupt
+        packets and unknown types are skipped, so only a closed socket
+        (ConnectionError) or the deadline (TimeoutError) ends the wait.
+        """
         while True:
-            if len(self._received) >= 5:
-                if self._received[:2] != MAGIC:
-                    raise ConnectionError("Invalid control packet header")
-                length = int.from_bytes(self._received[3:5], "big")
-                if length > 64:
-                    raise ConnectionError("Invalid control packet length")
-                total = 7 + length
-                if len(self._received) >= total:
-                    raw = bytes(self._received[:total])
-                    del self._received[:total]
-                    parsed = parse_packet(raw)
-                    if parsed is None:
-                        raise ConnectionError("Invalid control packet")
-                    return parsed
+            parsed = self._pop_buffered_packet()
+            if parsed is not None:
+                return parsed
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("Control ACK timeout")
-            if self._tcp_sock is None:
+            # close() may clear the attribute from another thread; a local
+            # reference turns that into an OSError instead of AttributeError.
+            sock = self._tcp_sock
+            if sock is None:
                 raise ConnectionError("Control socket closed")
-            self._tcp_sock.settimeout(remaining)
-            data = self._tcp_sock.recv(1024)
+            sock.settimeout(remaining)
+            data = sock.recv(1024)
             if not data:
                 raise ConnectionError("Camera closed control connection")
             self._received.extend(data)
 
+    def _pop_buffered_packet(self) -> dict | None:
+        """Remove and return the first valid packet, or None if incomplete."""
+        buf = self._received
+        while len(buf) >= 5:
+            if buf[:2] != MAGIC:
+                self._resync(1)
+                continue
+            length = int.from_bytes(buf[3:5], "big")
+            if length > MAX_CONTROL_PAYLOAD:
+                self._resync(2)
+                continue
+            total = 7 + length
+            if len(buf) < total:
+                return None
+            parsed = parse_packet(bytes(buf[:total]))
+            if parsed is None:
+                # Bad CRC or unknown type. Drop only the header: if it was a
+                # false match, a real packet may start inside these bytes.
+                _LOGGER.debug("Skipping unparseable control packet %s", buf[:total].hex())
+                self._resync(2)
+                continue
+            del buf[:total]
+            return parsed
+        return None
+
+    def _resync(self, start: int) -> None:
+        """Discard buffered bytes up to the next MAGIC at or after start."""
+        buf = self._received
+        index = buf.find(MAGIC, start)
+        if index < 0:
+            # Keep a trailing first MAGIC byte; its partner may still be in flight.
+            index = len(buf) - 1 if buf.endswith(MAGIC[:1]) else len(buf)
+        _LOGGER.debug("Discarding %d control bytes to resync", index)
+        del buf[:index]
+
+    def _discard_stale_replies(self) -> None:
+        """Drop late replies to earlier requests that already timed out.
+
+        _request_ack takes the first ACK it sees, so a reply that arrived
+        after its own request gave up would otherwise answer the next one.
+        """
+        sock = self._tcp_sock
+        if sock is None:
+            raise ConnectionError("Control socket closed")
+        self._received.clear()
+        sock.setblocking(False)
+        try:
+            while True:
+                if not sock.recv(1024):
+                    raise ConnectionError("Camera closed control connection")
+        except BlockingIOError:
+            pass
+        finally:
+            sock.settimeout(TCP_CONNECT_TIMEOUT)
+
+    def _send_heartbeat(self) -> bool:
+        """Send one heartbeat and match it only against its own ACK."""
+        self._discard_stale_replies()
+        return self._request_ack(TYPE_HEARTBEAT)
+
     def _request_ack(self, packet_type: int) -> bool:
         """Wait for one complete ACK within a single bounded deadline."""
-        assert self._tcp_sock is not None
-        self._tcp_sock.sendall(build_packet(packet_type, self._session_ts))
+        sock = self._tcp_sock
+        if sock is None:
+            raise ConnectionError("Control socket closed")
+        sock.sendall(build_packet(packet_type, self._session_ts))
         if packet_type == TYPE_START_VOICE:
             # A lost ACK may still mean START succeeded; clean that up on exit.
             self._stop_allowed = True
@@ -150,8 +218,10 @@ class BridgeSession:
                 return False
 
             self._running = True
+            # The thread keeps this session's event, so a later connect()
+            # cannot hand a straggling thread a fresh, unset one.
             self._heartbeat_thread = threading.Thread(
-                target=self._heartbeat_loop, daemon=True
+                target=self._heartbeat_loop, args=(self._stop_event,), daemon=True
             )
             self._heartbeat_thread.start()
             return True
@@ -180,9 +250,19 @@ class BridgeSession:
                 self._tcp_sock.shutdown(socket.SHUT_RD)
             except OSError:
                 pass
-        if self._heartbeat_thread and self._heartbeat_thread.is_alive():
-            self._heartbeat_thread.join(timeout=2)
-            self._heartbeat_thread = None
+        thread, self._heartbeat_thread = self._heartbeat_thread, None
+        if thread and thread.is_alive():
+            thread.join(timeout=2)
+            if thread.is_alive() and self._tcp_sock:
+                # Still blocked in sendall: the send buffer is full, so STOP
+                # could not get out either. Shut down writes to unblock it
+                # before the socket is torn down underneath the thread.
+                _LOGGER.warning("Heartbeat thread did not stop, forcing socket shutdown")
+                try:
+                    self._tcp_sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                thread.join(timeout=1)
         if self._tcp_sock:
             try:
                 if self._stop_allowed:
@@ -203,30 +283,29 @@ class BridgeSession:
                 pass
             self._udp_sock = None
 
-    def _heartbeat_loop(self) -> None:
-        """Send heartbeats every 5s."""
+    def _heartbeat_loop(self, stop_event: threading.Event) -> None:
+        """Send heartbeats every 5s until stop_event is set or the camera fails."""
         failures = 0
-        while self._running:
-            if self._stop_event.wait(timeout=HEARTBEAT_INTERVAL):
-                break  # stop_event was set
-            if not self._running or not self._tcp_sock:
-                break
+        while not stop_event.wait(timeout=HEARTBEAT_INTERVAL):
             try:
-                if self._request_ack(TYPE_HEARTBEAT):
+                if self._send_heartbeat():
                     failures = 0
                     continue
                 failures += 1
             except TimeoutError:
                 failures += 1
             except OSError as err:
-                if not self._stop_event.is_set():
+                # Errors after close() are expected and must not touch the
+                # state of whatever session replaced this one.
+                if not stop_event.is_set():
                     _LOGGER.error("Control connection lost: %s", err)
-                self._running = False
-                break
+                    self._running = False
+                return
             if failures > 5:
-                _LOGGER.error("Heartbeat failed %d times, closing", failures)
-                self._running = False
-                break
+                if not stop_event.is_set():
+                    _LOGGER.error("Heartbeat failed %d times, closing", failures)
+                    self._running = False
+                return
 
 
 def main() -> None:
@@ -285,13 +364,20 @@ def main() -> None:
     try:
         encoder.start()
         _LOGGER.info("Encoding pipeline active, reading PCMA/8kHz from stdin")
+        stdin_fd = sys.stdin.fileno()
         while True:
-            pcm_data = sys.stdin.buffer.read(STDIN_CHUNK_SIZE)
+            # A blocking read would never notice the heartbeat thread ending
+            # the session while go2rtc sends no audio, leaving the bridge
+            # alive with a dead session, so wake up periodically to check.
+            ready, _, _ = select.select([stdin_fd], [], [], STDIN_POLL_INTERVAL)
+            if not session.active:
+                raise ConnectionError("Voice session is no longer active")
+            if not ready:
+                continue
+            pcm_data = os.read(stdin_fd, STDIN_CHUNK_SIZE)
             if not pcm_data:
                 _LOGGER.info("stdin EOF, flushing encoder")
                 break
-            if not session.active:
-                raise ConnectionError("Voice session is no longer active")
             if first_stdin:
                 first_input_time = time.monotonic()
                 _LOGGER.info("First stdin data received (%d bytes)", len(pcm_data))
