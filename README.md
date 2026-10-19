@@ -206,7 +206,7 @@ streams:
   aqara_camera_192_0_2_10:
     - rtsp://user:pass@192.0.2.10:8554/ch1
     - "ffmpeg:aqara_camera_192_0_2_10#video=copy#audio=opus#audio=copy"
-    - "exec:/usr/local/bin/python3 /config/custom_components/aqara_camera_2_way_audio/bridge.py 192.0.2.10#backchannel=1"
+    - "exec:/usr/local/bin/python /config/custom_components/aqara_camera_2_way_audio/bridge.py 192.0.2.10#backchannel=1"
 ```
 
 Don't forget the router-side step: forward **UDP 8555** to the Home Assistant host (only required for the public-IP option, not for TURN). Restart Home Assistant after any edit to `go2rtc.yaml` so go2rtc reloads.
@@ -315,8 +315,8 @@ go2rtc requires RTSP credentials in the source URL it consumes, so the integrati
 Run the test suite:
 
 ```bash
-python3 -m pip install -r requirements_test.txt
-python3 -m pytest tests/
+python -m pip install -r requirements_test.txt
+python -m pytest tests/
 ```
 
 Install the pre-push hook so tests run before every push:
