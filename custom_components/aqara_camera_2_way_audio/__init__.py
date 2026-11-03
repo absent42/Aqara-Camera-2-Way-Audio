@@ -37,6 +37,11 @@ from .talk import AqaraLanTalkClient
 
 _LOGGER = logging.getLogger(__name__)
 
+# Every key HA's target selector can send. TALK_AUDIO_SCHEMA allows extras,
+# so area/floor/label targets reach the handler even though only entity_id
+# and device_id are resolved.
+_TARGET_KEYS = ("entity_id", "device_id", "area_id", "floor_id", "label_id")
+
 type AqaraCameraConfigEntry = ConfigEntry[AqaraCameraRuntimeData]
 
 TALK_AUDIO_SCHEMA = vol.Schema(
@@ -71,6 +76,10 @@ def _resolve_target_entries(
     Returns a deduplicated list of config entries. Multiple entity_ids
     belonging to the same camera resolve to a single entry, so the caller
     sees one talk_client per camera, not one per entity.
+
+    A call with no target at all falls back to every loaded camera. Area,
+    floor and label targets are not resolved; they return no entries rather
+    than widening to every camera.
     """
     entry_ids: set[str] = set()
 
@@ -93,7 +102,7 @@ def _resolve_target_entries(
                 for cid in dev.config_entries:
                     entry_ids.add(cid)
 
-    if raw_entity_ids is None and raw_device_ids is None:
+    if all(call.data.get(key) is None for key in _TARGET_KEYS):
         return [
             entry
             for entry in hass.config_entries.async_entries(DOMAIN)
@@ -143,14 +152,19 @@ async def async_setup_entry(
                     translation_key="no_camera_target",
                 )
 
+            failed_ips: list[str] = []
             for target_entry in entries:
                 rt = target_entry.runtime_data
                 if not rt.talk_client.is_connected:
                     if not await rt.talk_client.connect():
-                        raise HomeAssistantError(
-                            translation_domain=DOMAIN,
-                            translation_key="connect_failed",
+                        # One unreachable or busy camera must not stop
+                        # playback on the others; report it once all are done.
+                        _LOGGER.warning(
+                            "talk_audio_file: could not connect to camera %s",
+                            rt.camera_ip,
                         )
+                        failed_ips.append(rt.camera_ip)
+                        continue
                 # Release the session once the file is sent. The heartbeat
                 # loop keeps it alive indefinitely otherwise, holding the
                 # camera in talk mode and blocking browser two-way audio.
@@ -158,6 +172,12 @@ async def async_setup_entry(
                     await _send_aac_file(hass, rt.talk_client, file_path)
                 finally:
                     await rt.talk_client.disconnect()
+
+            if failed_ips:
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN,
+                    translation_key="connect_failed",
+                )
 
         hass.services.async_register(
             DOMAIN, "talk_audio_file", handle_talk_audio_file, schema=TALK_AUDIO_SCHEMA,

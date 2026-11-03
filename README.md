@@ -251,7 +251,7 @@ automation:
       file_path: /media/doorbell_greeting.aac
 ```
 
-You can target the camera by `device_id` or by any of the camera entity_ids on that device (all three quality entities map to the same physical speaker; multiple entity_ids for the same camera are deduplicated to a single playback). If `device_id` and `entity_id` are omitted, playback targets all configured Aqara cameras.
+You can target the camera by `device_id` or by any of the camera entity_ids on that device (all three quality entities map to the same physical speaker; multiple entity_ids for the same camera are deduplicated to a single playback). If `device_id` and `entity_id` are omitted, playback targets all loaded Aqara cameras. Area, floor and label targets are not supported and are rejected rather than playing on every camera. If a camera cannot be reached, playback continues on the others and the service call then reports the failure.
 
 Audio files must be in **AAC-ADTS** format, 16 kHz mono. Convert with ffmpeg:
 

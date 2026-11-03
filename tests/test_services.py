@@ -214,6 +214,38 @@ async def test_config_sounds_path_traversal_rejected(
     mock_send_aac_file.assert_not_awaited()
 
 
+async def test_config_sounds_symlink_escape_rejected(
+    hass: HomeAssistant,
+    mock_talk_client,
+    mock_send_aac_file,
+    tmp_path: pathlib.Path,
+) -> None:
+    """A symlink inside <config>/sounds pointing outside it is rejected."""
+    await _set_up_entry(hass, "192.0.2.10")
+    registry = er.async_get(hass)
+    target_entity = registry.async_get_entity_id("camera", DOMAIN, "192.0.2.10_camera_ch1")
+    sounds = tmp_path / "sounds"
+    sounds.mkdir()
+    outside = tmp_path / "outside.aac"
+    outside.write_bytes(b"")
+    link = sounds / "link.aac"
+    link.symlink_to(outside)
+
+    with (
+        patch.object(hass.config, "config_dir", str(tmp_path)),
+        patch.object(type(hass.config), "is_allowed_path", return_value=False),
+        pytest.raises(ServiceValidationError) as exc,
+    ):
+        await hass.services.async_call(
+            DOMAIN,
+            "talk_audio_file",
+            {"entity_id": target_entity, "file_path": str(link)},
+            blocking=True,
+        )
+    assert exc.value.translation_key == "path_not_allowed"
+    mock_send_aac_file.assert_not_awaited()
+
+
 async def test_no_target_falls_back_to_loaded_entries(
     hass: HomeAssistant,
     mock_talk_client,
@@ -253,6 +285,27 @@ async def test_unknown_target_raises_without_fallback(
             DOMAIN,
             "talk_audio_file",
             {"device_id": "unknown_device_id", "file_path": "/tmp/x.aac"},
+            blocking=True,
+        )
+    assert exc.value.translation_key == "no_camera_target"
+    mock_send_aac_file.assert_not_awaited()
+
+
+@pytest.mark.parametrize("target_key", ["area_id", "floor_id", "label_id"])
+async def test_unresolved_target_kind_raises_without_fallback(
+    hass: HomeAssistant,
+    mock_talk_client,
+    mock_send_aac_file,
+    allow_paths,
+    target_key: str,
+) -> None:
+    """Area/floor/label targets must not widen to every camera."""
+    await _set_up_entry(hass, "192.0.2.10")
+    with pytest.raises(ServiceValidationError) as exc:
+        await hass.services.async_call(
+            DOMAIN,
+            "talk_audio_file",
+            {target_key: "front_porch", "file_path": "/tmp/x.aac"},
             blocking=True,
         )
     assert exc.value.translation_key == "no_camera_target"
@@ -368,6 +421,31 @@ async def test_connect_failure_raises_home_assistant_error(
             {"entity_id": target, "file_path": "/tmp/x.aac"},
             blocking=True,
         )
+
+
+async def test_connect_failure_on_one_camera_still_plays_others(
+    hass: HomeAssistant,
+    mock_talk_client,
+    mock_send_aac_file,
+    allow_paths,
+) -> None:
+    """One camera failing to connect does not stop playback on the others."""
+    await _set_up_entry(hass, "192.0.2.10")
+    await _set_up_entry(hass, "192.0.2.11")
+    # Both entries share the patched client; the first connect fails.
+    mock_talk_client.connect = AsyncMock(side_effect=[False, True])
+
+    with pytest.raises(HomeAssistantError) as exc:
+        await hass.services.async_call(
+            DOMAIN,
+            "talk_audio_file",
+            {"file_path": "/tmp/x.aac"},
+            blocking=True,
+        )
+    assert exc.value.translation_key == "connect_failed"
+    assert mock_talk_client.connect.await_count == 2
+    mock_send_aac_file.assert_awaited_once()
+    mock_talk_client.disconnect.assert_awaited_once()
 
 
 async def test_service_disconnects_after_send(
