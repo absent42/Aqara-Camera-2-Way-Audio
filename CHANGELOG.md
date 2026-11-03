@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v1.0.3] - 2026-11-03
 
 ### Fixed
 
@@ -14,11 +14,25 @@ Contribution by [artemdanielov](https://github.com/artemdanielov)
 - Bridge shutdown completes within about seven seconds, inside go2rtc's ten-second grace period, so ffmpeg is no longer left running after a forced kill.
 - go2rtc config errors are logged with the file path and error detail (OS error or YAML line and column), without exception text or tracebacks that could expose RTSP credentials.
 
+Contribution by [petrouv](https://github.com/petrouv)
+
+- `talk_audio_file` no longer cuts off the end of the audio: the session stays open for half a second after the last frame so the camera can finish playing.
+
 ### Changed
+
+- `talk_audio_file` rejects area, floor and label targets rather than playing on every camera.
+- When `talk_audio_file` targets several cameras and one cannot be reached, playback continues on the others, and the service call then reports the failure.
+
+Contribution by [artemdanielov](https://github.com/artemdanielov)
 
 - The generated exec source now requests `#backchannel=1#audio=pcma/8000#killsignal=15#killtimeout=10`. Existing streams written by v1.0.2 are upgraded automatically.
 - The integration only rewrites or removes go2rtc streams it owns, tracked by a fingerprint saved in the config entry. Streams edited by hand in `go2rtc.yaml`, and streams belonging to other integrations, are left untouched.
 - Reloading, changing options, or disabling the integration no longer removes its go2rtc stream. The stream is removed only when the integration entry is deleted, so 2-way audio keeps working through go2rtc while the entry is disabled.
+
+Contribution by [petrouv](https://github.com/petrouv)
+
+- `talk_audio_file` accepts files under `/config/sounds` without adding the folder to `allowlist_external_dirs`.
+- `talk_audio_file` called without `entity_id` or `device_id` now plays on all loaded Aqara cameras instead of raising an error.
 
 ## [v1.0.2] - 2026-10-13
 

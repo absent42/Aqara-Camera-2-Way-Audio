@@ -1,24 +1,27 @@
-# v1.0.2 - Aqara Camera 2-Way Audio
+# v1.0.3 - Aqara Camera 2-Way Audio
 
-Reliability release. Talk sessions now survive network quirks and bad messages from the camera, recover cleanly when the camera drops the connection, and start with less delay.
+Reliability and usability release. Talk sessions end cleanly, the integration no longer overwrites go2rtc streams you have edited by hand, and the `talk_audio_file` action is easier to use and no longer cuts off the end of a recording.
 
-Contribution by [alikorkmaz](https://github.com/alikorkmaz).
+Contributions by [artemdanielov](https://github.com/artemdanielov) and [petrouv](https://github.com/petrouv).
 
 ## Highlights
 
-- **More reliable session start** -- talk no longer fails when the camera's reply arrives split across network reads or bundled with another reply. Applies to both browser talk and the `talk_audio_file` action.
-- **Sessions survive bad messages** -- a single corrupted or unrecognised control message from the camera no longer ends an active talk session.
-- **Clean recovery after a dropped connection** -- if the camera drops the talk connection while nobody is speaking, the bridge exits promptly, so the next push-to-talk starts a fresh session instead of failing.
-- **Accurate camera health checks** -- a late heartbeat reply is no longer counted as the answer to the next heartbeat, so a camera that has stopped responding is detected.
-- **Smoother audio** -- audio queued during a pause in speech is no longer sent in a burst when speech resumes. Duplicate frames and dropped microphone audio in the encoder are also fixed.
-- **Lower latency** -- the bridge reads microphone input in 32 ms chunks instead of 256 ms, and ffmpeg no longer probes the known input format at startup.
-- **Safer cleanup** -- a refused talk session no longer sends a stop command that could end another caller's session, and the camera is released if the encoder fails to start.
+- **Clean end of talk sessions** -- go2rtc now asks the bridge to stop instead of killing it, so the camera is always told the session is over, even if the browser disconnects while the session is starting.
+- **Faster, bounded shutdown** -- the bridge finishes cleaning up within about seven seconds, inside go2rtc's ten-second limit, so no stray ffmpeg process is left running.
+- **Your go2rtc edits are kept** -- the integration only updates or removes go2rtc streams it created. Streams you have customized in `go2rtc.yaml`, and streams from other integrations, are left alone.
+- **No more cut-off recordings** -- `talk_audio_file` waits half a second after the last frame so the camera finishes playing before the session closes.
+- **Simpler sound file setup** -- files in `/config/sounds` can be played without adding the folder to `allowlist_external_dirs`.
+- **All cameras by default** -- calling `talk_audio_file` without a target plays on every loaded Aqara camera. If one camera cannot be reached, the others still play and the action then reports the failure. Area, floor and label targets are rejected rather than playing on every camera.
+- **Safer logs** -- go2rtc config errors now include the file path and the line or OS error, without any text that could expose RTSP credentials.
 
-See [CHANGELOG.md](CHANGELOG.md) for the full list of fixes.
+See [CHANGELOG.md](CHANGELOG.md) for the full list of changes.
 
 ## Upgrading
 
-No configuration changes. Restart Home Assistant after updating.
+Restart Home Assistant after updating. On first start the integration updates its go2rtc stream to the new bridge settings and shows a notification asking for one more restart so go2rtc picks them up.
+
+- If you edited the integration's stream in `go2rtc.yaml` by hand, it is no longer updated automatically. Update the `exec:` line yourself to end with `#backchannel=1#audio=pcma/8000#killsignal=15#killtimeout=10`.
+- Reloading, disabling, or changing options of the integration no longer removes its go2rtc stream. The stream is removed only when you delete the integration entry.
 
 ## Compatibility
 
