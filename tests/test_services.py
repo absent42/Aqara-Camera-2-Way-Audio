@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import pathlib
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -21,6 +22,7 @@ from custom_components.aqara_camera_2_way_audio.const import (
     DOMAIN,
     FRAME_DURATION,
     MAX_AAC_FILE_BYTES,
+    PLAYBACK_DRAIN_DELAY,
 )
 
 
@@ -166,21 +168,95 @@ async def test_disallowed_file_path_raises(
             )
 
 
-async def test_no_target_raises(
+async def test_config_sounds_path_allowed_without_allowlist(
+    hass: HomeAssistant,
+    mock_talk_client,
+    mock_send_aac_file,
+) -> None:
+    """Files inside <config>/sounds are permitted even if is_allowed_path is False."""
+    await _set_up_entry(hass, "192.0.2.10")
+    registry = er.async_get(hass)
+    target_entity = registry.async_get_entity_id("camera", DOMAIN, "192.0.2.10_camera_ch1")
+    sound_file = str(pathlib.Path(hass.config.config_dir) / "sounds" / "greeting.aac")
+
+    with patch.object(type(hass.config), "is_allowed_path", return_value=False):
+        await hass.services.async_call(
+            DOMAIN,
+            "talk_audio_file",
+            {"entity_id": target_entity, "file_path": sound_file},
+            blocking=True,
+        )
+    assert mock_send_aac_file.await_count == 1
+
+
+async def test_config_sounds_path_traversal_rejected(
+    hass: HomeAssistant,
+    mock_talk_client,
+    mock_send_aac_file,
+) -> None:
+    """Path traversal escaping <config>/sounds is rejected when not in allowlist."""
+    await _set_up_entry(hass, "192.0.2.10")
+    registry = er.async_get(hass)
+    target_entity = registry.async_get_entity_id("camera", DOMAIN, "192.0.2.10_camera_ch1")
+    escaped_file = str(
+        pathlib.Path(hass.config.config_dir) / "sounds" / ".." / "outside.aac"
+    )
+
+    with patch.object(type(hass.config), "is_allowed_path", return_value=False):
+        with pytest.raises(ServiceValidationError) as exc:
+            await hass.services.async_call(
+                DOMAIN,
+                "talk_audio_file",
+                {"entity_id": target_entity, "file_path": escaped_file},
+                blocking=True,
+            )
+    assert exc.value.translation_key == "path_not_allowed"
+    mock_send_aac_file.assert_not_awaited()
+
+
+async def test_no_target_falls_back_to_loaded_entries(
     hass: HomeAssistant,
     mock_talk_client,
     mock_send_aac_file,
     allow_paths,
 ) -> None:
-    """Calling the service with no target raises ServiceValidationError."""
+    """Calling the service without entity_id or device_id falls back to loaded entries."""
     await _set_up_entry(hass, "192.0.2.10")
-    with pytest.raises(ServiceValidationError):
+    await hass.services.async_call(
+        DOMAIN,
+        "talk_audio_file",
+        {"file_path": "/tmp/x.aac"},
+        blocking=True,
+    )
+    assert mock_send_aac_file.await_count == 1
+
+
+async def test_unknown_target_raises_without_fallback(
+    hass: HomeAssistant,
+    mock_talk_client,
+    mock_send_aac_file,
+    allow_paths,
+) -> None:
+    """Targeting a non-matching entity_id or device_id raises ServiceValidationError."""
+    await _set_up_entry(hass, "192.0.2.10")
+    with pytest.raises(ServiceValidationError) as exc:
         await hass.services.async_call(
             DOMAIN,
             "talk_audio_file",
-            {"file_path": "/tmp/x.aac"},
+            {"entity_id": "camera.unrelated_camera", "file_path": "/tmp/x.aac"},
             blocking=True,
         )
+    assert exc.value.translation_key == "no_camera_target"
+
+    with pytest.raises(ServiceValidationError) as exc:
+        await hass.services.async_call(
+            DOMAIN,
+            "talk_audio_file",
+            {"device_id": "unknown_device_id", "file_path": "/tmp/x.aac"},
+            blocking=True,
+        )
+    assert exc.value.translation_key == "no_camera_target"
+    mock_send_aac_file.assert_not_awaited()
 
 
 async def test_send_aac_file_rejects_oversize_file(hass: HomeAssistant) -> None:
@@ -235,7 +311,7 @@ async def test_send_aac_file_drift_corrected_pacing(hass: HomeAssistant) -> None
         await _send_aac_file(hass, client, "/tmp/x.aac")
         elapsed = asyncio.get_running_loop().time() - start
 
-    expected = n_frames * FRAME_DURATION
+    expected = n_frames * FRAME_DURATION + PLAYBACK_DRAIN_DELAY
     # Drift-corrected pacing should land within 50ms of the ideal duration.
     assert elapsed == pytest.approx(expected, abs=0.050), (
         f"drift exceeded budget: elapsed={elapsed:.3f}s expected={expected:.3f}s"
