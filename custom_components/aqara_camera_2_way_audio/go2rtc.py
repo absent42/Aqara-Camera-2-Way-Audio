@@ -1,4 +1,20 @@
-"""Conservative, credential-safe go2rtc stream configuration management."""
+"""go2rtc stream registration for the Aqara camera backchannel.
+
+Registers a go2rtc stream with three producers: an RTSP source for the
+camera video/audio, an ffmpeg source that re-exposes the stream with
+Opus audio for WebRTC compatibility, and an exec source that runs
+bridge.py to ferry the WebRTC mic audio back to the camera speaker.
+
+Registration is done by writing to go2rtc.yaml because go2rtc blocks
+exec sources via REST API for security. The integration continues to
+work without go2rtc -- only the WebRTC backchannel is affected.
+
+Ownership is tracked by a sources digest saved in the HA config entry.
+Only an unmodified owned stream (or the exact legacy output of this
+integration) is ever rewritten or removed; customized and foreign
+entries are left untouched. Errors are logged without exception text,
+since YAML errors can embed credential-bearing source lines.
+"""
 
 from __future__ import annotations
 
@@ -24,11 +40,17 @@ _EXEC_SUFFIX = "#backchannel=1#audio=pcma/8000#killsignal=15#killtimeout=10"
 # Stored in the HA config entry, not go2rtc.yaml; contains no source credentials.
 CONF_GO2RTC_DIGEST = "go2rtc_sources_digest"
 CONF_GO2RTC_STREAM_NAME = "go2rtc_stream_name"
+
+# Serialises read-modify-write on go2rtc.yaml across threads (the integration
+# dispatches register_stream/remove_stream via hass.async_add_executor_job, so
+# concurrent setup of two camera entries would otherwise race).
 _CONFIG_LOCK = threading.Lock()
 
 
 class _QuotedDumper(yaml.SafeDumper):
-    """Keep our representer local to this integration."""
+    # Empty subclass so add_representer below does not mutate the global
+    # SafeDumper state shared with the rest of the process.
+    pass
 
 
 def _quoted_str_representer(dumper: yaml.Dumper, data: str) -> yaml.ScalarNode:
@@ -41,6 +63,7 @@ _QuotedDumper.add_representer(str, _quoted_str_representer)
 
 
 def _dump_config(config: dict) -> str:
+    """Dump go2rtc config to YAML, quoting strings that contain #."""
     return yaml.dump(config, Dumper=_QuotedDumper, default_flow_style=False, width=4096)
 
 
@@ -78,10 +101,18 @@ def _log_config_error(action: str, path: Path, err: Exception) -> None:
 
 
 def build_exec_source(config_dir: str, camera_ip: str) -> str:
-    """Request PCMA/8kHz and SIGTERM with a ten-second go2rtc wait limit.
+    """Build the go2rtc exec source URL for the backchannel bridge.
 
-    go2rtc uses exec.Command, not a shell, and separates options with '#'.
+    The exec source tells go2rtc to spawn the bridge script when a browser
+    microphone connects. Explicit PCMA/8kHz matches the bridge's A-law
+    decoder. SIGTERM lets its cleanup send STOP_VOICE, with a ten-second
+    graceful-stop wait limit on go2rtc builds supporting it.
+
+    go2rtc uses exec.Command (not a shell), so we pass the absolute script
+    path. go2rtc's ParseQuery splits on # (not &) for multiple parameters.
     """
+    # Defense in depth: the exec source is space-delimited, so any whitespace
+    # in camera_ip would inject extra argv elements into bridge.py.
     assert not any(c.isspace() for c in camera_ip), (
         "camera_ip must not contain whitespace"
     )
@@ -161,7 +192,16 @@ def register_stream(
     owned_digest: str | None = None,
     previous_stream_name: str | None = None,
 ) -> str:
-    """Return wrote/noop/skipped/error; never overwrite unowned custom sources.
+    """Add or update a stream in go2rtc.yaml. Never raises.
+
+    Returns one of:
+      - "wrote": new content written
+      - "noop": sources already current (source and exec option order are
+        ignored); nothing written
+      - "skipped": a stream by this name exists but is unowned, customized,
+        or has an incomplete ownership snapshot; not overwritten
+      - "error": IO, parse or unexpected failure (logged without exception
+        text, since it can contain RTSP credentials)
 
     The caller persists the stream name and sources_digest(sources) on
     wrote/noop. A later update must match that snapshot, allowing changed HA
@@ -230,7 +270,8 @@ def register_stream(
             config_path,
         )
         return "wrote"
-    except (OSError, yaml.YAMLError, TypeError, ValueError) as err:
+    except Exception as err:
+        # Best-effort: a go2rtc config problem must not fail entry setup.
         _log_config_error("write", config_path, err)
         return "error"
 
@@ -241,6 +282,7 @@ def remove_stream(
     """Remove only an explicitly owned, unmodified stream on entry deletion.
 
     Missing ownership is deliberately a no-op. Reload/unload must not call this.
+    Best-effort, never raises.
     """
     if owned_digest is None:
         return
@@ -257,5 +299,5 @@ def remove_stream(
             del streams[stream_name]
             _write_config(config_path, config)
         _LOGGER.info("go2rtc stream '%s' removed from %s", stream_name, config_path)
-    except (OSError, yaml.YAMLError, TypeError, ValueError) as err:
+    except Exception as err:
         _log_config_error("remove from", config_path, err)

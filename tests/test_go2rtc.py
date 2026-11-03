@@ -346,6 +346,18 @@ class TestRetainedBridgeOptions:
         assert "private-fixture" not in caplog.text
         assert all(record.exc_info is None for record in caplog.records)
 
+    def test_unexpected_error_returns_error_without_exception_text(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with patch.object(
+            go2rtc_mod, "_read_config", side_effect=RuntimeError("private-fixture")
+        ):
+            assert register_stream(str(tmp_path), "camera", ["rtsp://example.invalid"]) == "error"
+            remove_stream(str(tmp_path), "camera", "0" * 64)
+        assert caplog.text.count("RuntimeError") == 2
+        assert "private-fixture" not in caplog.text
+        assert all(record.exc_info is None for record in caplog.records)
+
     @staticmethod
     def assert_preserved(tmp_path: Path, existing: object, desired: object, result: str) -> None:
         path = tmp_path / "go2rtc.yaml"

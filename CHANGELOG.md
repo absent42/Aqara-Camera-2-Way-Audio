@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+Contribution by [artemdanielov](https://github.com/artemdanielov)
+
+- The bridge now stops cleanly when go2rtc ends a talk session: go2rtc sends SIGTERM instead of killing it outright, so the camera is told to end the voice session, including when the browser disconnects during the startup handshake.
+- Bridge shutdown completes within about seven seconds, inside go2rtc's ten-second grace period, so ffmpeg is no longer left running after a forced kill.
+- go2rtc config errors are logged with the file path and error detail (OS error or YAML line and column), without exception text or tracebacks that could expose RTSP credentials.
+
+### Changed
+
+- The generated exec source now requests `#backchannel=1#audio=pcma/8000#killsignal=15#killtimeout=10`. Existing streams written by v1.0.2 are upgraded automatically.
+- The integration only rewrites or removes go2rtc streams it owns, tracked by a fingerprint saved in the config entry. Streams edited by hand in `go2rtc.yaml`, and streams belonging to other integrations, are left untouched.
+- Reloading, changing options, or disabling the integration no longer removes its go2rtc stream. The stream is removed only when the integration entry is deleted, so 2-way audio keeps working through go2rtc while the entry is disabled.
+
 ## [v1.0.2] - 2026-10-13
 
 ### Fixed

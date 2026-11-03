@@ -14,7 +14,7 @@ go2rtc stream config example (written automatically by the integration):
     aqara_camera_192_0_2_10:
       - rtsp://user:pass@CAMERA_IP:8554/ch1
       - "ffmpeg:aqara_camera_192_0_2_10#video=copy#audio=opus#audio=copy"
-      - "exec:/usr/local/bin/python3 /config/custom_components/aqara_camera_2_way_audio/bridge.py CAMERA_IP#backchannel=1"
+      - "exec:/usr/local/bin/python3 /config/custom_components/aqara_camera_2_way_audio/bridge.py CAMERA_IP#backchannel=1#audio=pcma/8000#killsignal=15#killtimeout=10"
 """
 
 from __future__ import annotations
