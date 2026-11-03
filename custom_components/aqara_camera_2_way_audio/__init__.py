@@ -30,6 +30,7 @@ from .const import (
     FRAME_DURATION,
     MAX_AAC_FILE_BYTES,
     PLATFORMS,
+    PLAYBACK_DRAIN_DELAY,
 )
 from .protocol import extract_adts_frames
 from .talk import AqaraLanTalkClient
@@ -92,6 +93,13 @@ def _resolve_target_entries(
                 for cid in dev.config_entries:
                     entry_ids.add(cid)
 
+    if raw_entity_ids is None and raw_device_ids is None:
+        return [
+            entry
+            for entry in hass.config_entries.async_entries(DOMAIN)
+            if hasattr(entry, "runtime_data")
+        ]
+
     entries: list[AqaraCameraConfigEntry] = []
     for entry_id in entry_ids:
         entry = hass.config_entries.async_get_entry(entry_id)
@@ -118,7 +126,10 @@ async def async_setup_entry(
     if not hass.services.has_service(DOMAIN, "talk_audio_file"):
         async def handle_talk_audio_file(call: ServiceCall) -> None:
             file_path = call.data["file_path"]
-            if not hass.config.is_allowed_path(file_path):
+            p_obj = pathlib.Path(file_path).resolve()
+            sounds_dir = (pathlib.Path(hass.config.config_dir) / "sounds").resolve()
+            is_sound_path = sounds_dir in p_obj.parents
+            if not (is_sound_path or hass.config.is_allowed_path(file_path)):
                 raise ServiceValidationError(
                     translation_domain=DOMAIN,
                     translation_key="path_not_allowed",
@@ -291,7 +302,7 @@ async def _send_aac_file(
     start = loop.time()
     for i, frame in enumerate(frames):
         if not client.is_connected:
-            break
+            return
         client.send_audio_frame(frame, i * AAC_FRAME_SAMPLES)
         # Drift-corrected pacing: each frame's deadline is anchored to start,
         # so per-frame send overhead does not accumulate over a long file.
@@ -299,3 +310,6 @@ async def _send_aac_file(
         delay = target - loop.time()
         if delay > 0:
             await asyncio.sleep(delay)
+
+    # Allow camera DSP buffer to finish playback before disconnecting session.
+    await asyncio.sleep(PLAYBACK_DRAIN_DELAY)

@@ -78,7 +78,7 @@
   },
   "exceptions": {
     "path_not_allowed": {
-      "message": "Path not allowed: {file_path}. Check allowlist_external_dirs."
+      "message": "Path not allowed: {file_path}. Place the file under /config/sounds or add its directory to allowlist_external_dirs."
     },
     "no_camera_target": {
       "message": "No Aqara camera selected as target. Pass entity_id or device_id."

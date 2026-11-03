@@ -251,7 +251,7 @@ automation:
       file_path: /media/doorbell_greeting.aac
 ```
 
-You can target the camera by `device_id` or by any of the camera entity_ids on that device (all three quality entities map to the same physical speaker; multiple entity_ids for the same camera are deduplicated to a single playback).
+You can target the camera by `device_id` or by any of the camera entity_ids on that device (all three quality entities map to the same physical speaker; multiple entity_ids for the same camera are deduplicated to a single playback). If `device_id` and `entity_id` are omitted, playback targets all configured Aqara cameras.
 
 Audio files must be in **AAC-ADTS** format, 16 kHz mono. Convert with ffmpeg:
 
@@ -259,7 +259,7 @@ Audio files must be in **AAC-ADTS** format, 16 kHz mono. Convert with ffmpeg:
 ffmpeg -i input.mp3 -ar 16000 -ac 1 -c:a aac -b:a 32k -f adts output.aac
 ```
 
-The file path must be inside one of HA's `allowlist_external_dirs`.
+Files under `<config>/sounds` are allowed automatically; any other file path must be inside one of HA's `allowlist_external_dirs`.
 
 > **Note:** Browser two-way audio and `talk_audio_file` are mutually exclusive. The camera supports one voice session at a time. If the WebRTC card is connected, the service call will fail.
 

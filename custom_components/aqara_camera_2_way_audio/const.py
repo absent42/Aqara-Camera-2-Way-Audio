@@ -44,6 +44,7 @@ TCP_CONNECT_TIMEOUT = 3.0  # seconds
 AAC_SAMPLE_RATE = 16000
 AAC_FRAME_SAMPLES = 1024
 FRAME_DURATION = AAC_FRAME_SAMPLES / AAC_SAMPLE_RATE  # 0.064s
+PLAYBACK_DRAIN_DELAY = 0.5  # seconds for camera speaker buffer to drain before STOP_VOICE
 
 # Max size for files passed to talk_audio_file, to bound executor memory.
 MAX_AAC_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
