@@ -166,10 +166,10 @@ class BridgeSession:
         sock = self._tcp_sock
         if sock is None:
             raise ConnectionError("Control socket closed")
-        sock.sendall(build_packet(packet_type, self._session_ts))
         if packet_type == TYPE_START_VOICE:
-            # A lost ACK may still mean START succeeded; clean that up on exit.
+            # Arm before sendall: SIGTERM/partial writes may follow acceptance.
             self._stop_allowed = True
+        sock.sendall(build_packet(packet_type, self._session_ts))
         deadline = time.monotonic() + TCP_CONNECT_TIMEOUT
         while True:
             parsed = self._receive_packet(deadline)
@@ -256,7 +256,8 @@ class BridgeSession:
         if self._tcp_sock:
             try:
                 if self._stop_allowed:
-                    self._tcp_sock.settimeout(TCP_CONNECT_TIMEOUT)
+                    # Shutdown budget: joins <=3s, STOP <=1s, encoder <=3s.
+                    self._tcp_sock.settimeout(1)
                     self._tcp_sock.sendall(build_packet(TYPE_STOP_VOICE, self._session_ts))
             except OSError:
                 pass
@@ -316,19 +317,8 @@ def main() -> None:
         sys.exit(1)
 
     camera_ip = sys.argv[1]
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    _LOGGER.info("Bridge starting for %s", camera_ip)
-
-    from custom_components.aqara_camera_2_way_audio.encoder import AACEncoder
-
     session = BridgeSession(camera_ip)
-    if not session.connect():
-        sys.exit(1)
-
-    # go2rtc sends G.711 A-law (PCMA) at 8kHz to exec backchannel stdin.
-    # Despite version reporting as 1.9.14, HA's bundled go2rtc uses stdin.NewClient
-    # which hardcodes PCMA/8000 and ignores the #audio= parameter.
-    encoder = AACEncoder(input_format="alaw")
+    encoder = None
     pacer = FramePacer()
     total_frames = 0
 
@@ -342,7 +332,18 @@ def main() -> None:
     first_stdin = True
     first_frame = True
     first_input_time = 0.0
+    previous_sigterm = None
     try:
+        # All resource acquisition is inside the cleanup scope, including the
+        # handshake and encoder construction. Before this handler no sockets
+        # or subprocesses exist.
+        previous_sigterm = signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+        _LOGGER.info("Bridge starting for %s", camera_ip)
+        if not session.connect():
+            sys.exit(1)
+        from custom_components.aqara_camera_2_way_audio.encoder import AACEncoder
+
+        encoder = AACEncoder(input_format="alaw")
         encoder.start()
         _LOGGER.info("Encoding pipeline active, reading PCMA/8kHz from stdin")
         stdin_fd = sys.stdin.fileno()
@@ -383,9 +384,18 @@ def main() -> None:
         _LOGGER.error("Bridge stopped after audio/control failure: %s", err)
         sys.exit(1)
     finally:
+        # Repeated cancellation must not interrupt STOP or subprocess reaping.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         # Release the camera before waiting for the encoder subprocess.
-        session.close()
-        encoder.stop()
+        try:
+            session.close()
+        finally:
+            try:
+                if encoder is not None:
+                    encoder.stop()
+            finally:
+                if previous_sigterm is not None:
+                    signal.signal(signal.SIGTERM, previous_sigterm)
         _LOGGER.info("Bridge stopped")
 
 

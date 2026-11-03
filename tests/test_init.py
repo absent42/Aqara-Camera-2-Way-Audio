@@ -24,7 +24,9 @@ def captured_register_stream():
     """
     calls = []
 
-    def _capture(config_dir, stream_name, sources):
+    def _capture(
+        config_dir, stream_name, sources, camera_ip, owned_digest, previous_stream_name
+    ):
         calls.append((config_dir, stream_name, list(sources)))
         return "wrote"
 

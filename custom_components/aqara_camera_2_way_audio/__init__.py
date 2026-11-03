@@ -181,12 +181,26 @@ async def _setup_go2rtc_config(
 
     entry.runtime_data.go2rtc_stream_name = stream_name
 
+    sources = [rtsp_source, ffmpeg_source, exec_source]
     result = await hass.async_add_executor_job(
         go2rtc_mod.register_stream,
         hass.config.config_dir,
         stream_name,
-        [rtsp_source, ffmpeg_source, exec_source],
+        sources,
+        data.camera_ip,
+        entry.data.get(go2rtc_mod.CONF_GO2RTC_DIGEST),
+        entry.data.get(go2rtc_mod.CONF_GO2RTC_STREAM_NAME),
     )
+
+    if result in ("wrote", "noop"):
+        hass.config_entries.async_update_entry(
+            entry,
+            data={
+                **entry.data,
+                go2rtc_mod.CONF_GO2RTC_DIGEST: go2rtc_mod.sources_digest(sources),
+                go2rtc_mod.CONF_GO2RTC_STREAM_NAME: stream_name,
+            },
+        )
 
     if result == "wrote":
         notif_id = (
@@ -210,13 +224,6 @@ async def async_unload_entry(
     """Unload an Aqara Camera config entry."""
     await entry.runtime_data.talk_client.disconnect()
 
-    if entry.runtime_data.go2rtc_stream_name:
-        await hass.async_add_executor_job(
-            go2rtc_mod.remove_stream,
-            hass.config.config_dir,
-            entry.runtime_data.go2rtc_stream_name,
-        )
-
     result = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
     # Only count entries that are still loaded; the entry being unloaded is
@@ -231,6 +238,25 @@ async def async_unload_entry(
         hass.services.async_remove(DOMAIN, "talk_audio_file")
 
     return result
+
+
+async def async_remove_entry(
+    hass: HomeAssistant, entry: AqaraCameraConfigEntry
+) -> None:
+    """Delete configuration only on removal, never on reload or HA shutdown."""
+    stream_name = entry.data.get(go2rtc_mod.CONF_GO2RTC_STREAM_NAME)
+    owned_digest = entry.data.get(go2rtc_mod.CONF_GO2RTC_DIGEST)
+    if not (
+        isinstance(stream_name, str) and stream_name
+        and isinstance(owned_digest, str) and owned_digest
+    ):
+        return
+    await hass.async_add_executor_job(
+        go2rtc_mod.remove_stream,
+        hass.config.config_dir,
+        stream_name,
+        owned_digest,
+    )
 
 
 async def _options_update_listener(

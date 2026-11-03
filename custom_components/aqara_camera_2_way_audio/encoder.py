@@ -182,12 +182,12 @@ class AACEncoder:
         except OSError:
             pass
         try:
-            self._proc.wait(timeout=5)
+            self._proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
             self._proc.kill()
             try:
-                self._proc.wait()
-            except OSError as err:
+                self._proc.wait(timeout=1)
+            except (OSError, subprocess.TimeoutExpired) as err:
                 _LOGGER.warning("ffmpeg reap after kill failed: %s", err)
         if self._proc.stdout:
             self._proc.stdout.close()
